@@ -80,7 +80,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "8888:8888"
+      # - "8888:8888"   # uncomment when kafka-ui is enabled
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs/nginx:/certs:ro

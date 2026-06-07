@@ -368,7 +368,14 @@ An OpenAPI-documented REST API is also available at `/swagger` for integrating P
 
 > **Kafka UI is disabled by default.** It is intended for troubleshooting only — enable it temporarily when you need to inspect topics, browse messages, or check consumer group lag, then disable it again.
 
-To enable Kafka UI, uncomment the `kafka-ui` service block and the `kafka-ui` entry in nginx's `depends_on` in [docker-compose.yml](docker-compose.yml), then start it alongside nginx:
+To enable Kafka UI, uncomment the following in [docker-compose.yml](docker-compose.yml):
+- the `kafka-ui` service block
+- the `kafka-ui` entry in nginx's `depends_on`
+- the `8888:8888` port entry under nginx's `ports`
+
+Then uncomment the `server { listen 8888 ssl; ... }` block in [nginx/nginx.conf](nginx/nginx.conf).
+
+Start the services:
 
 ```bash
 docker compose up -d kafka-ui nginx
