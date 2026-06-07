@@ -1,0 +1,203 @@
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/IBM/sarama"
+    "github.com/jackc/pgx/v5/pgxpool"
+)
+
+// ── Payload structs (mirror collector) ──────────────────────────────────────
+
+type VlanEntry struct {
+    Timestamp time.Time `json:"timestamp"`
+    NodeID    string    `json:"node_id"`
+    VlanID    uint32    `json:"vlan_id"`
+    Name      string    `json:"name"`
+    Status    string    `json:"status"`
+}
+
+type MacEntry struct {
+    Timestamp  time.Time `json:"timestamp"`
+    NodeID     string    `json:"node_id"`
+    MacAddress string    `json:"mac_address"`
+    Interface  string    `json:"interface"`
+    Vlan       uint32    `json:"vlan"`
+    Type       string    `json:"type"`
+}
+
+type ArpEntry struct {
+    Timestamp  time.Time `json:"timestamp"`
+    NodeID     string    `json:"node_id"`
+    IPAddress  string    `json:"ip_address"`
+    MacAddress string    `json:"mac_address"`
+    Interface  string    `json:"interface"`
+    Age        uint32    `json:"age"`
+}
+
+type IfEntry struct {
+    Timestamp   time.Time `json:"timestamp"`
+    NodeID      string    `json:"node_id"`
+    Name        string    `json:"name"`
+    Description string    `json:"description"`
+    Shutdown    bool      `json:"shutdown"`
+    IPAddress   string    `json:"ip_address"`
+    PrefixLen   int       `json:"prefix_len"`
+    VRF         string    `json:"vrf"`
+    MTU         uint32    `json:"mtu"`
+}
+
+// ── Kafka consumer handler ───────────────────────────────────────────────────
+
+type handler struct{ db *pgxpool.Pool }
+
+func (h *handler) Setup(_ sarama.ConsumerGroupSession) error   { return nil }
+func (h *handler) Cleanup(_ sarama.ConsumerGroupSession) error { return nil }
+
+func (h *handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for msg := range claim.Messages() {
+        var err error
+        switch msg.Topic {
+        case "mac-table":
+            err = h.handleMAC(msg.Value)
+        case "arp-table":
+            err = h.handleARP(msg.Value)
+        case "interface-table":
+            err = h.handleInterface(msg.Value)
+        case "vlan-table":
+            err = h.handleVlan(msg.Value)
+        }
+        if err != nil {
+            log.Printf("handle %s: %v", msg.Topic, err)
+        } else {
+            sess.MarkMessage(msg, "")
+        }
+    }
+    return nil
+}
+
+func (h *handler) handleMAC(b []byte) error {
+    var e MacEntry
+    if err := json.Unmarshal(b, &e); err != nil {
+        return err
+    }
+    _, err := h.db.Exec(context.Background(), `
+        INSERT INTO mac_table (node_id, mac_address, interface, vlan, mac_type, collected_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (mac_address) DO UPDATE SET
+            node_id      = EXCLUDED.node_id,
+            interface    = EXCLUDED.interface,
+            vlan         = EXCLUDED.vlan,
+            mac_type     = EXCLUDED.mac_type,
+            collected_at = EXCLUDED.collected_at`,
+        e.NodeID, e.MacAddress, e.Interface, e.Vlan, e.Type, e.Timestamp)
+    return err
+}
+
+func (h *handler) handleARP(b []byte) error {
+    var e ArpEntry
+    if err := json.Unmarshal(b, &e); err != nil {
+        return err
+    }
+    _, err := h.db.Exec(context.Background(), `
+        INSERT INTO arp_table (node_id, ip_address, mac_address, interface, age_seconds, collected_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (node_id, ip_address) DO UPDATE SET
+            mac_address  = EXCLUDED.mac_address,
+            interface    = EXCLUDED.interface,
+            age_seconds  = EXCLUDED.age_seconds,
+            collected_at = EXCLUDED.collected_at`,
+        e.NodeID, e.IPAddress, e.MacAddress, e.Interface, e.Age, e.Timestamp)
+    return err
+}
+
+func (h *handler) handleInterface(b []byte) error {
+    var e IfEntry
+    if err := json.Unmarshal(b, &e); err != nil {
+        return err
+    }
+    _, err := h.db.Exec(context.Background(), `
+        INSERT INTO interface_table (node_id, name, description, shutdown, ip_address, prefix_len, vrf, mtu, collected_at)
+        VALUES ($1, $2, $3, $4, NULLIF($5,''), NULLIF($6,0), NULLIF($7,''), NULLIF($8,0), $9)
+        ON CONFLICT (node_id, name) DO UPDATE SET
+            description  = EXCLUDED.description,
+            shutdown     = EXCLUDED.shutdown,
+            ip_address   = EXCLUDED.ip_address,
+            prefix_len   = EXCLUDED.prefix_len,
+            vrf          = EXCLUDED.vrf,
+            mtu          = EXCLUDED.mtu,
+            collected_at = EXCLUDED.collected_at`,
+        e.NodeID, e.Name, e.Description, e.Shutdown,
+        e.IPAddress, e.PrefixLen, e.VRF, e.MTU, e.Timestamp)
+    return err
+}
+
+func (h *handler) handleVlan(b []byte) error {
+    var e VlanEntry
+    if err := json.Unmarshal(b, &e); err != nil {
+        return err
+    }
+    _, err := h.db.Exec(context.Background(), `
+        INSERT INTO vlan_table (node_id, vlan_id, name, status, collected_at)
+        VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5)
+        ON CONFLICT (node_id, vlan_id) DO UPDATE SET
+            name         = EXCLUDED.name,
+            status       = EXCLUDED.status,
+            collected_at = EXCLUDED.collected_at`,
+        e.NodeID, e.VlanID, e.Name, e.Status, e.Timestamp)
+    return err
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+
+func main() {
+    broker := envOr("KAFKA_BROKER", "localhost:19092")
+    dsn    := envOr("POSTGRES_DSN", "postgres://telemetry:telemetry@localhost:15432/telemetry")
+
+    db, err := pgxpool.New(context.Background(), dsn)
+    if err != nil {
+        log.Fatalf("postgres: %v", err)
+    }
+    defer db.Close()
+
+    cfg := sarama.NewConfig()
+    cfg.Consumer.Offsets.Initial = sarama.OffsetNewest
+    cfg.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{
+        sarama.NewBalanceStrategyRoundRobin(),
+    }
+
+    cg, err := sarama.NewConsumerGroup([]string{broker}, "telemetry-consumer", cfg)
+    if err != nil {
+        log.Fatalf("consumer group: %v", err)
+    }
+    defer cg.Close()
+
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    topics := []string{"mac-table", "arp-table", "interface-table", "vlan-table"}
+    h := &handler{db: db}
+
+    log.Println("consumer started")
+    for {
+        if err := cg.Consume(ctx, topics, h); err != nil {
+            log.Printf("consume error: %v", err)
+        }
+        if ctx.Err() != nil {
+            return
+        }
+    }
+}
+
+func envOr(key, def string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return def
+}

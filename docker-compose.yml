@@ -1,0 +1,114 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.1.6
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda
+    networks:
+      - telemetry
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    entrypoint: ["/postgres-ssl-entrypoint.sh"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/tmp/pg-server.crt
+      - -c
+      - ssl_key_file=/tmp/pg-server.key
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    environment:
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: telemetry
+      POSTGRES_DB: telemetry
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./certs/postgres:/ssl:ro
+      - ./postgres/ssl-entrypoint.sh:/postgres-ssl-entrypoint.sh:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    networks:
+      - telemetry
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - redpanda
+    # Port 8080 not bound to the host — only accessible via nginx on port 443
+    environment:
+      KAFKA_CLUSTERS_0_NAME: telemetry
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
+    networks:
+      - telemetry
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    depends_on:
+      - kafka-ui
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs/nginx:/certs:ro
+    networks:
+      - telemetry
+
+  collector:
+    build:
+      context: .
+      dockerfile: collector/Dockerfile
+    container_name: collector
+    ports:
+      - "57400:57400"     # Cisco MDT default port
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      GRPC_GO_LOG_VERBOSITY_LEVEL: "99"
+      GRPC_GO_LOG_SEVERITY_LEVEL: "info"
+    depends_on:
+      - redpanda
+    networks:
+      - telemetry
+
+  consumer:
+    build:
+      context: .
+      dockerfile: consumer/Dockerfile
+    container_name: consumer
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      POSTGRES_DSN: postgres://telemetry:telemetry@postgres:5432/telemetry?sslmode=require
+    depends_on:
+      - redpanda
+      - postgres
+    networks:
+      - telemetry
+
+volumes:
+  redpanda-data:
+  postgres-data:
+
+networks:
+  telemetry:
+    driver: bridge
