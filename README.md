@@ -51,20 +51,21 @@ Cisco IOS-XE Switches / Routers
   └──────┬──────┘
          │
          ▼
-  ┌─────────────┐     HTTP (8888)
-  │  PortFinder │ ◄──────────────── Browser / API clients
-  │  (webapp)   │  Search by MAC or IP → port, VLAN, node
-  └─────────────┘
-
   ┌─────────────┐     HTTPS (443)
-  │    Nginx    │ ◄──────────────── Browser
+  │    Nginx    │ ◄──────────────── Browser / API clients
   │  (TLS proxy)│
   └──────┬──────┘
          │  HTTP (internal only)
          ▼
   ┌─────────────┐
-  │  Kafka UI   │  Topic browser / message inspector
+  │  PortFinder │  Search by MAC or IP → port, VLAN, node
+  │  (webapp)   │
   └─────────────┘
+
+  ┌─────────────┐     HTTPS (8888)          ┌─────────────┐
+  │    Nginx    │ ◄──────────────── Browser  │  Kafka UI   │  (disabled by default —
+  │  (TLS proxy)│ ───────────────────────►  │             │   enable for troubleshooting)
+  └─────────────┘   HTTP (internal only)    └─────────────┘
 ```
 
 ### Telemetry Paths
@@ -99,7 +100,7 @@ Unknown paths are logged and dropped.
 
 ### 1. Generate TLS Certificates
 
-Both Nginx (Kafka UI) and PostgreSQL require TLS certificates. A helper script generates self-signed certificates valid for 10 years:
+Both Nginx (webapp and Kafka UI) and PostgreSQL require TLS certificates. A helper script generates self-signed certificates valid for 10 years:
 
 ```bash
 bash certs/gen-certs.sh <SERVER_IP>
@@ -119,12 +120,16 @@ certs/postgres/root.crt      # CA cert for client verification
 To use a certificate signed by your own CA instead, replace the generated files and restart the affected containers:
 
 ```bash
+# Nginx cert (serves both PortFinder on 443 and Kafka UI on 8888)
 cp your-signed.crt certs/nginx/server.crt
 cp your-signed.key certs/nginx/server.key
+docker compose restart nginx
+
+# PostgreSQL cert
 cp your-signed.crt certs/postgres/server.crt
 cp your-signed.key certs/postgres/server.key
 cp business-ca.crt certs/postgres/root.crt
-docker compose restart nginx postgres
+docker compose restart postgres
 ```
 
 ### 2. Configure Credentials
@@ -145,7 +150,7 @@ Docker Compose reads this file automatically. The `postgres` container and the `
 docker compose up -d
 ```
 
-This brings up six containers: `redpanda`, `postgres`, `kafka-ui`, `nginx`, `collector`, and `consumer`.
+This brings up five containers: `redpanda`, `postgres`, `nginx`, `collector`, `webapp`, and `consumer`. Kafka UI is commented out by default — see [Kafka UI](#kafka-ui) below if you need it for troubleshooting. Kafka UI is disabled by default — see [Kafka UI](#kafka-ui) below if you need it.
 
 ### 4. Run Database Migrations
 
@@ -340,7 +345,7 @@ All tables use `ON CONFLICT ... DO UPDATE` (upsert), so each row always reflects
 
 ## PortFinder
 
-PortFinder is available at `http://<SERVER_IP>:8888` once the stack is running.
+PortFinder is available at `https://<SERVER_IP>` once the stack is running (self-signed certificate — accept the browser warning, or replace with your CA cert).
 
 Enter one or more MAC addresses or IP addresses — one per line — and hit **Search** or **Ctrl+Enter**. All common MAC formats are accepted and normalised automatically:
 
@@ -361,7 +366,21 @@ An OpenAPI-documented REST API is also available at `/swagger` for integrating P
 
 ## Kafka UI
 
-The Kafka UI is available at `https://<SERVER_IP>` (self-signed certificate — accept the browser warning). It lets you browse topics, inspect messages, and monitor consumer group lag. Port 8080 is not exposed directly; all access goes through Nginx on port 443.
+> **Kafka UI is disabled by default.** It is intended for troubleshooting only — enable it temporarily when you need to inspect topics, browse messages, or check consumer group lag, then disable it again.
+
+To enable Kafka UI, uncomment the `kafka-ui` service block and the `kafka-ui` entry in nginx's `depends_on` in [docker-compose.yml](docker-compose.yml), then start it alongside nginx:
+
+```bash
+docker compose up -d kafka-ui nginx
+```
+
+Kafka UI is then available at `https://<SERVER_IP>:8888` (same self-signed certificate as PortFinder — accept the browser warning). Port 8080 is not exposed directly; all access goes through Nginx on port 8888 with TLS.
+
+To disable it again:
+
+```bash
+docker compose stop kafka-ui
+```
 
 ---
 
