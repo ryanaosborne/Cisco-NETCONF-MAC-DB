@@ -2,6 +2,8 @@
 
 A real-time network telemetry pipeline for Cisco IOS-XE devices, with a web tool called **PortFinder** that lets anyone — network admin or not — look up exactly where a device is connected on the network.
 
+![WebUI](WebUI.png)
+
 ## What This Is For
 
 Finding where a device is plugged in is a routine but time-consuming task: cross-reference the MAC address against the MAC address table, find the switch port, look up the VLAN, and match the interface description to figure out which physical switch and closet you're dealing with. Traditionally this means SSH-ing into switches and running several commands. PortFinder eliminates that entirely.
