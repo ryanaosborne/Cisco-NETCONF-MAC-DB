@@ -58,8 +58,16 @@ func normalizeMac(s string) []string {
 }
 
 // searchSQL finds rows by MAC or IP address.
+// latest_arp keeps only the newest ARP entry per MAC so stale duplicates
+// (e.g. a device that moved ports) do not produce multiple result rows.
 // The UNION second half catches IPs whose MAC hasn't yet appeared in mac_table.
 const searchSQL = `
+WITH latest_arp AS (
+    SELECT DISTINCT ON (mac_address)
+        node_id, ip_address, mac_address, interface, age_seconds, collected_at
+    FROM arp_table
+    ORDER BY mac_address, collected_at DESC
+)
 SELECT
     m.node_id,
     m.mac_address,
@@ -69,7 +77,7 @@ SELECT
     m.vlan,
     v.name         AS vlan_name
 FROM mac_table m
-LEFT JOIN arp_table       a ON  m.mac_address = a.mac_address
+LEFT JOIN latest_arp      a ON  m.mac_address = a.mac_address
 LEFT JOIN interface_table i ON  m.node_id     = i.node_id AND m.interface = i.name
 LEFT JOIN vlan_table      v ON  m.node_id     = v.node_id AND m.vlan      = v.vlan_id
 WHERE lower(m.mac_address) = ANY($1) OR a.ip_address = ANY($2)
@@ -84,11 +92,16 @@ SELECT
     NULL::text,
     NULL::integer,
     NULL::text
-FROM arp_table a
-WHERE a.ip_address = ANY($2)
-  AND NOT EXISTS (
-      SELECT 1 FROM mac_table WHERE lower(mac_address) = lower(a.mac_address)
-  )
+FROM (
+    SELECT DISTINCT ON (ip_address)
+        node_id, ip_address, mac_address, collected_at
+    FROM arp_table
+    WHERE ip_address = ANY($2)
+    ORDER BY ip_address, collected_at DESC
+) a
+WHERE NOT EXISTS (
+    SELECT 1 FROM mac_table WHERE lower(mac_address) = lower(a.mac_address)
+)
 
 ORDER BY node_id, mac_address
 `
