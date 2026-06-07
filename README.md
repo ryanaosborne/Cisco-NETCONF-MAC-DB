@@ -1,6 +1,6 @@
 # SwitchNetconf + PortFinder WebApp
 
-A real-time network telemetry pipeline for Cisco IOS-XE devices, with a web tool called **PortFinder** that lets anyone — network admin or not — look up exactly where a device is connected on the network.
+A real-time network telemetry pipeline for Cisco IOS-XE devices, with a web tool called **PortFinder** that lets anyone — network engineer or not — look up exactly where a device is connected on the network.
 
 ![WebUI](WebUI.png)
 
@@ -160,6 +160,14 @@ psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:15432/${POSTGRE
 ```
 
 The migrations are idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running them is safe.
+
+### 4.5 Restart the Webapp Container
+
+After migrations complete, restart the webapp container so it picks up the newly created tables:
+
+```bash
+docker compose restart webapp
+```
 
 ### 5. Configure Cisco Devices for MDT Dial-Out
 

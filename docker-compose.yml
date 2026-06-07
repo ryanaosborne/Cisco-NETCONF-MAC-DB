@@ -46,6 +46,12 @@ services:
       - ./certs/postgres:/ssl:ro
       - ./postgres/ssl-entrypoint.sh:/postgres-ssl-entrypoint.sh:ro
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT 1 FROM mac_table LIMIT 1' && echo 'healthy' || echo 'not ready'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     networks:
       - telemetry
 
@@ -101,7 +107,8 @@ services:
     environment:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - telemetry
 
@@ -114,8 +121,10 @@ services:
       KAFKA_BROKER: redpanda:9092
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require
     depends_on:
-      - redpanda
-      - postgres
+      redpanda:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks:
       - telemetry
 
