@@ -1,4 +1,4 @@
-# Cisco-Stream + PortFinder
+# SwitchNetconf + PortFinder WebApp
 
 A real-time network telemetry pipeline for Cisco IOS-XE devices, with a web tool called **PortFinder** that lets anyone — network admin or not — look up exactly where a device is connected on the network.
 
@@ -14,11 +14,11 @@ Finding where a device is plugged in is a routine but time-consuming task: cross
 
 **For VLAN troubleshooting**, results show the VLAN number and name alongside the port, so you can quickly identify mismatches — for example, a device that landed on the wrong VLAN, or a port whose native VLAN doesn't match its neighbours.
 
-The pipeline underneath continuously collects MAC address tables, ARP caches, interface configurations, and VLAN data from Cisco IOS-XE devices using Model-Driven Telemetry (MDT) dial-out over gRPC. That data is streamed through a Kafka-compatible broker (Redpanda) and stored in PostgreSQL. PortFinder queries that database in real time.
+SwitchNetconf continuously collects MAC address tables, ARP caches, interface configurations, and VLAN data from Cisco IOS-XE devices using Model-Driven Telemetry (MDT) dial-out over gRPC. That data is streamed through a Kafka-compatible broker (Redpanda) and stored in PostgreSQL. PortFinder queries that database in real time.
 
 ## How It Works
 
-Cisco IOS-XE devices can be configured to push structured telemetry data to a remote collector using gRPC dial-out. This project receives those streams, decodes the GPB-KV encoded payloads, and writes the data to a Kafka-compatible broker (Redpanda). A second service consumes those messages and upserts the records into PostgreSQL.
+Cisco IOS-XE devices can be configured to push structured telemetry data to a remote collector using gRPC dial-out. SwitchNetconf receives those streams, decodes the GPB-KV encoded payloads, and writes the data to a Kafka-compatible broker (Redpanda). A second service consumes those messages and upserts the records into PostgreSQL.
 
 ```
 Cisco IOS-XE Switches / Routers
