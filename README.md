@@ -208,28 +208,41 @@ FROM arp_table a
 JOIN mac_table m ON a.mac_address = m.mac_address;
 ```
 
-**All shutdown interfaces:**
+**IP-to-MAC-to-Interface with VLAN info (join ARP, MAC, interface, and VLAN tables)**
 ```sql
-SELECT node_id, name, description
-FROM interface_table
-WHERE shutdown = true
-ORDER BY node_id, name;
+SELECT
+    a.node_id,
+    a.mac_address,
+    m.interface,
+    i.description   AS interface_description,
+    m.vlan,
+    v.name          AS vlan_name
+FROM arp_table a
+JOIN mac_table       m ON  a.mac_address = m.mac_address
+LEFT JOIN interface_table i ON  m.node_id   = i.node_id
+                            AND m.interface  = i.name
+LEFT JOIN vlan_table      v ON  m.node_id   = v.node_id
+                            AND m.vlan       = v.vlan_id
+WHERE a.ip_address = '10.0.0.1';
 ```
 
-**All active VLANs across devices:**
+**MAC-to-IP-to-Interface with VLAN info (join ARP, MAC, interface, and VLAN tables)**
 ```sql
-SELECT node_id, vlan_id, name, status
-FROM vlan_table
-WHERE status = 'active'
-ORDER BY node_id, vlan_id;
-```
-
-**Stale ARP entries (not updated in the last 10 minutes):**
-```sql
-SELECT node_id, ip_address, mac_address, collected_at
-FROM arp_table
-WHERE collected_at < NOW() - INTERVAL '10 minutes'
-ORDER BY collected_at;
+SELECT
+    m.node_id,
+    m.mac_address,
+    a.ip_address,
+    m.interface,
+    i.description   AS interface_description,
+    m.vlan,
+    v.name          AS vlan_name
+FROM mac_table m
+LEFT JOIN arp_table       a ON  m.mac_address = a.mac_address
+LEFT JOIN interface_table i ON  m.node_id     = i.node_id
+                            AND m.interface    = i.name
+LEFT JOIN vlan_table      v ON  m.node_id     = v.node_id
+                            AND m.vlan         = v.vlan_id
+WHERE m.mac_address = 'aa:bb:cc:dd:ee:ff';
 ```
 
 ---
