@@ -68,6 +68,8 @@ Unknown paths are logged and dropped.
 - Docker and Docker Compose
 - `openssl` (for certificate generation)
 - `psql` or any PostgreSQL client (for running migrations)
+ - sudo apt-get install -y postgresql-client-common
+ - sudo apt-get install -y postgresql-client
 
 ---
 
