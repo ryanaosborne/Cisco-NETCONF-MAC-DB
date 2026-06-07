@@ -1,6 +1,18 @@
-# Cisco-Stream
+# Cisco-Stream + PortFinder
 
-A real-time network telemetry pipeline that ingests Model-Driven Telemetry (MDT) streams from Cisco IOS-XE devices and stores them in PostgreSQL for querying.
+A real-time network telemetry pipeline for Cisco IOS-XE devices, with a web tool called **PortFinder** that lets anyone — network admin or not — look up exactly where a device is connected on the network.
+
+## What This Is For
+
+Finding where a device is plugged in is a routine but time-consuming task: cross-reference the MAC address against the MAC address table, find the switch port, look up the VLAN, and match the interface description to figure out which physical switch and closet you're dealing with. Traditionally this means SSH-ing into switches and running several commands. PortFinder eliminates that entirely.
+
+**For network admins**, PortFinder speeds up port location searches, VLAN troubleshooting, and device audits. Instead of jumping between switches, you paste a MAC or IP and immediately see the switch, port, VLAN, and interface description.
+
+**For help desk and non-networking staff**, PortFinder makes it possible to answer "where is this machine connected?" without any knowledge of the network CLI. Enter a MAC address or IP address and get a plain-English result.
+
+**For VLAN troubleshooting**, results show the VLAN number and name alongside the port, so you can quickly identify mismatches — for example, a device that landed on the wrong VLAN, or a port whose native VLAN doesn't match its neighbours.
+
+The pipeline underneath continuously collects MAC address tables, ARP caches, interface configurations, and VLAN data from Cisco IOS-XE devices using Model-Driven Telemetry (MDT) dial-out over gRPC. That data is streamed through a Kafka-compatible broker (Redpanda) and stored in PostgreSQL. PortFinder queries that database in real time.
 
 ## How It Works
 
@@ -34,6 +46,12 @@ Cisco IOS-XE Switches / Routers
          ▼
   ┌─────────────┐
   │ PostgreSQL  │  Persistent store (SSL required)
+  └──────┬──────┘
+         │
+         ▼
+  ┌─────────────┐     HTTP (8888)
+  │  PortFinder │ ◄──────────────── Browser / API clients
+  │  (webapp)   │  Search by MAC or IP → port, VLAN, node
   └─────────────┘
 
   ┌─────────────┐     HTTPS (443)
@@ -307,6 +325,27 @@ WHERE m.mac_address = 'aa:bb:cc:dd:ee:ff';
 | `collected_at` | timestamptz | Timestamp from the telemetry message |
 
 All tables use `ON CONFLICT ... DO UPDATE` (upsert), so each row always reflects the most recent telemetry snapshot for that key.
+
+---
+
+## PortFinder
+
+PortFinder is available at `http://<SERVER_IP>:8888` once the stack is running.
+
+Enter one or more MAC addresses or IP addresses — one per line — and hit **Search** or **Ctrl+Enter**. All common MAC formats are accepted and normalised automatically:
+
+| Format | Example |
+|--------|---------|
+| Colon-separated | `aa:bb:cc:dd:ee:ff` |
+| Hyphen-separated | `aa-bb-cc-dd-ee-ff` |
+| Cisco dot notation | `aabb.ccdd.eeff` |
+| Bare hex | `aabbccddeeff` |
+
+All formats are case-insensitive. You can mix MACs and IPs in a single search.
+
+Results always include: the switch hostname (Node ID), MAC address, IP address, switch port (interface), port description, VLAN number, and VLAN name. If a value hasn't been collected yet — for example, a MAC with no ARP entry — that field shows as `—` rather than dropping the row entirely.
+
+An OpenAPI-documented REST API is also available at `/swagger` for integrating PortFinder into scripts, helpdesk tools, or other automation.
 
 ---
 

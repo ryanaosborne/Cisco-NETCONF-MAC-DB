@@ -1,0 +1,145 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PortFinder API",
+    "description": "Look up where a device is connected on the network. Query Cisco IOS-XE telemetry data by MAC address or IP address to find the switch port, VLAN, and interface details. Accepts multiple terms per request and supports colon, hyphen, Cisco dot, and bare hex MAC formats (all case-insensitive).",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "/", "description": "This server" }
+  ],
+  "paths": {
+    "/api/search": {
+      "post": {
+        "summary": "Search by MAC or IP address",
+        "description": "Returns all matching rows from the telemetry database. Each term is classified as a MAC address or IP address and looked up accordingly. A single request may mix MACs and IPs.\n\n**Accepted MAC formats** (all case-insensitive):\n- Colon-separated: `aa:bb:cc:dd:ee:ff`\n- Hyphen-separated: `aa-bb-cc-dd-ee-ff`\n- Cisco dot notation: `aabb.ccdd.eeff`\n- Bare hex: `aabbccddeeff`",
+        "operationId": "search",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SearchRequest" },
+              "examples": {
+                "single-mac": {
+                  "summary": "Single MAC address",
+                  "value": { "terms": ["aa:bb:cc:dd:ee:ff"] }
+                },
+                "single-ip": {
+                  "summary": "Single IP address",
+                  "value": { "terms": ["10.0.0.203"] }
+                },
+                "mixed": {
+                  "summary": "Mixed MACs and IPs",
+                  "value": { "terms": ["aa:bb:cc:dd:ee:ff", "10.0.0.203", "4cab4f8b9902"] }
+                },
+                "cisco-dot": {
+                  "summary": "Cisco dot-notation MAC",
+                  "value": { "terms": ["aabb.ccdd.eeff"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matching telemetry records. Returns an empty array when no matches are found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/TelemetryRecord" }
+                },
+                "example": [
+                  {
+                    "node_id": "switch1.example.com",
+                    "mac_address": "aa:bb:cc:dd:ee:ff",
+                    "ip_address": "10.0.0.203",
+                    "interface": "GigabitEthernet1/0/4",
+                    "interface_description": "User access port",
+                    "vlan": 100,
+                    "vlan_name": "USERS"
+                  }
+                ]
+              }
+            }
+          },
+          "400": {
+            "description": "Request body is not valid JSON.",
+            "content": {
+              "text/plain": { "schema": { "type": "string" } }
+            }
+          },
+          "500": {
+            "description": "Database error.",
+            "content": {
+              "text/plain": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "SearchRequest": {
+        "type": "object",
+        "required": ["terms"],
+        "properties": {
+          "terms": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "MAC addresses and/or IP addresses to look up.",
+            "example": ["aa:bb:cc:dd:ee:ff", "10.0.0.203"]
+          }
+        }
+      },
+      "TelemetryRecord": {
+        "type": "object",
+        "required": ["node_id", "mac_address"],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "description": "Device hostname or ID reported by the telemetry stream.",
+            "example": "switch1.example.com"
+          },
+          "mac_address": {
+            "type": "string",
+            "description": "MAC address as stored by the device.",
+            "example": "aa:bb:cc:dd:ee:ff"
+          },
+          "ip_address": {
+            "type": "string",
+            "nullable": true,
+            "description": "IP address from the ARP table. Null if no ARP entry exists for this MAC.",
+            "example": "10.0.0.203"
+          },
+          "interface": {
+            "type": "string",
+            "nullable": true,
+            "description": "Full interface name (e.g. GigabitEthernet1/0/1). Null when the MAC has not yet appeared in the MAC address table.",
+            "example": "GigabitEthernet1/0/4"
+          },
+          "interface_description": {
+            "type": "string",
+            "nullable": true,
+            "description": "Configured interface description.",
+            "example": "User access port"
+          },
+          "vlan": {
+            "type": "integer",
+            "nullable": true,
+            "description": "VLAN number.",
+            "example": 100
+          },
+          "vlan_name": {
+            "type": "string",
+            "nullable": true,
+            "description": "VLAN name.",
+            "example": "USERS"
+          }
+        }
+      }
+    }
+  }
+}

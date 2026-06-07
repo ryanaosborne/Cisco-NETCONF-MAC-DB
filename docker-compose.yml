@@ -91,6 +91,20 @@ services:
     networks:
       - telemetry
 
+  webapp:
+    build:
+      context: .
+      dockerfile: webapp/Dockerfile
+    container_name: webapp
+    ports:
+      - "8888:8888"
+    environment:
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require
+    depends_on:
+      - postgres
+    networks:
+      - telemetry
+
   consumer:
     build:
       context: .
