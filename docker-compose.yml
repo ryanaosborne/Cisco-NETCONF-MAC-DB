@@ -18,6 +18,12 @@ services:
       - "9644:9644"
     volumes:
       - redpanda-data:/var/lib/redpanda
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
     networks:
       - telemetry
 
@@ -55,16 +61,27 @@ services:
     networks:
       - telemetry
 
-  # kafka-ui is disabled by default — enable only for troubleshooting.
-  # Uncomment this block and the kafka-ui entry in nginx depends_on, then run:
-  #   docker compose up -d kafka-ui nginx
+  # ---------------------------------------------------------------------------
+  # Kafka UI — disabled by default. For troubleshooting only.
   #
+  # To enable:
+  #   1. Uncomment the kafka-ui service block below.
+  #   2. Uncomment "- kafka-ui" in the nginx depends_on list below.
+  #   3. Uncomment "- "8888:8888"" in the nginx ports list below.
+  #   4. Uncomment the "listen 8888 ssl" server block in nginx/nginx.conf.
+  #   5. Run: docker compose up -d kafka-ui nginx
+  #
+  # To disable again:
+  #   1. Re-comment all four items above (reverse steps 1-4).
+  #   2. Run: docker compose stop kafka-ui && docker compose up -d nginx
+  # ---------------------------------------------------------------------------
   # kafka-ui:
   #   image: provectuslabs/kafka-ui:latest
   #   container_name: kafka-ui
   #   depends_on:
-  #     - redpanda
-  #   # Port not bound to host — accessible via nginx on port 8888
+  #     redpanda:
+  #       condition: service_healthy
+  #   # Port not exposed to host — accessible only via nginx on port 8888
   #   environment:
   #     KAFKA_CLUSTERS_0_NAME: telemetry
   #     KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
@@ -75,12 +92,12 @@ services:
     image: nginx:alpine
     container_name: nginx
     depends_on:
-      # - kafka-ui   # uncomment when kafka-ui is enabled
+      # - kafka-ui   # uncomment when kafka-ui is enabled (step 2)
       - webapp
     ports:
       - "80:80"
       - "443:443"
-      # - "8888:8888"   # uncomment when kafka-ui is enabled
+      # - "8888:8888"   # uncomment when kafka-ui is enabled (step 3)
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs/nginx:/certs:ro
@@ -99,7 +116,8 @@ services:
       GRPC_GO_LOG_VERBOSITY_LEVEL: "99"
       GRPC_GO_LOG_SEVERITY_LEVEL: "info"
     depends_on:
-      - redpanda
+      redpanda:
+        condition: service_healthy
     networks:
       - telemetry
 
@@ -127,7 +145,7 @@ services:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require
     depends_on:
       redpanda:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
     networks:

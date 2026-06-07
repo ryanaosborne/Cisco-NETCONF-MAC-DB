@@ -368,14 +368,33 @@ An OpenAPI-documented REST API is also available at `/swagger` for integrating P
 
 > **Kafka UI is disabled by default.** It is intended for troubleshooting only — enable it temporarily when you need to inspect topics, browse messages, or check consumer group lag, then disable it again.
 
-To enable Kafka UI, uncomment the following in [docker-compose.yml](docker-compose.yml):
-- the `kafka-ui` service block
-- the `kafka-ui` entry in nginx's `depends_on`
-- the `8888:8888` port entry under nginx's `ports`
+### Enabling Kafka UI
 
-Then uncomment the `server { listen 8888 ssl; ... }` block in [nginx/nginx.conf](nginx/nginx.conf).
+Make the following four changes, then bring up the services:
 
-Start the services:
+**1. Uncomment the `kafka-ui` service block in [docker-compose.yml](docker-compose.yml):**
+```yaml
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ...
+```
+
+**2. Uncomment `- kafka-ui` in the nginx `depends_on` list in [docker-compose.yml](docker-compose.yml):**
+```yaml
+    depends_on:
+      - kafka-ui   # ← uncomment this line
+      - webapp
+```
+
+**3. Uncomment the `8888:8888` port in the nginx `ports` list in [docker-compose.yml](docker-compose.yml):**
+```yaml
+    ports:
+      - "8888:8888"   # ← uncomment this line
+```
+
+**4. Uncomment the `listen 8888 ssl` server block in [nginx/nginx.conf](nginx/nginx.conf).**
+
+Then start the services:
 
 ```bash
 docker compose up -d kafka-ui nginx
@@ -383,10 +402,12 @@ docker compose up -d kafka-ui nginx
 
 Kafka UI is then available at `https://<SERVER_IP>:8888` (same self-signed certificate as PortFinder — accept the browser warning). Port 8080 is not exposed directly; all access goes through Nginx on port 8888 with TLS.
 
-To disable it again:
+### Disabling Kafka UI
+
+Re-comment all four items above (reverse steps 1–4), then run:
 
 ```bash
-docker compose stop kafka-ui
+docker compose stop kafka-ui && docker compose up -d nginx
 ```
 
 ---
