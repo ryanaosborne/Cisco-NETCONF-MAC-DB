@@ -107,7 +107,19 @@ cp business-ca.crt certs/postgres/root.crt
 docker compose restart nginx postgres
 ```
 
-### 2. Start the Stack
+### 2. Configure Credentials
+
+Copy the example below to `.env` in the project root and set your own values before starting the stack:
+
+```bash
+POSTGRES_USER=telemetry
+POSTGRES_PASSWORD=telemetry
+POSTGRES_DB=telemetry
+```
+
+Docker Compose reads this file automatically. The `postgres` container and the `consumer`'s `POSTGRES_DSN` both interpolate these variables at startup.
+
+### 3. Start the Stack
 
 ```bash
 docker compose up -d
@@ -115,12 +127,13 @@ docker compose up -d
 
 This brings up six containers: `redpanda`, `postgres`, `kafka-ui`, `nginx`, `collector`, and `consumer`.
 
-### 3. Run Database Migrations
+### 4. Run Database Migrations
 
-Apply the three migration files in order against the running PostgreSQL instance:
+Apply the three migration files in order against the running PostgreSQL instance. Source `.env` first so the credentials match what the container was started with:
 
 ```bash
-psql "postgres://telemetry:telemetry@localhost:15432/telemetry?sslmode=require" \
+source .env
+psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:15432/${POSTGRES_DB}?sslmode=require" \
   -f migrations/001_init.sql \
   -f migrations/002_interfaces.sql \
   -f migrations/003_vlans.sql
@@ -128,7 +141,7 @@ psql "postgres://telemetry:telemetry@localhost:15432/telemetry?sslmode=require" 
 
 The migrations are idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running them is safe.
 
-### 4. Configure Cisco Devices for MDT Dial-Out
+### 5. Configure Cisco Devices for MDT Dial-Out
 
 On each IOS-XE device, configure a telemetry subscription that dials out to the collector. Replace `<SERVER_IP>` with the IP address of the host running this stack.
 
@@ -180,16 +193,18 @@ show telemetry internal connection
 
 ## Querying the Data
 
-Connect to PostgreSQL:
+Connect to PostgreSQL. Source `.env` first so the shell picks up the credentials:
 
 ```bash
-psql "postgres://telemetry:telemetry@localhost:15432/telemetry?sslmode=require"
+source .env
+psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:15432/${POSTGRES_DB}?sslmode=require"
 ```
 
 For remote connections, pass the CA certificate:
 
 ```bash
-psql "postgres://telemetry:telemetry@<SERVER_IP>:15432/telemetry?sslmode=verify-ca&sslrootcert=certs/postgres/root.crt"
+source .env
+psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@<SERVER_IP>:15432/${POSTGRES_DB}?sslmode=verify-ca&sslrootcert=certs/postgres/root.crt"
 ```
 
 ### Example Queries
@@ -303,6 +318,16 @@ The Kafka UI is available at `https://<SERVER_IP>` (self-signed certificate — 
 
 ## Environment Variables
 
+### `.env` (Docker Compose credentials)
+
+Docker Compose reads `.env` from the project root automatically.
+
+| Variable | Description |
+|----------|-------------|
+| `POSTGRES_USER` | PostgreSQL username (used by `postgres` container and consumer DSN) |
+| `POSTGRES_PASSWORD` | PostgreSQL password |
+| `POSTGRES_DB` | PostgreSQL database name |
+
 ### Collector
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -313,7 +338,7 @@ The Kafka UI is available at `https://<SERVER_IP>` (self-signed certificate — 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KAFKA_BROKER` | `localhost:19092` | Redpanda/Kafka broker address |
-| `POSTGRES_DSN` | `postgres://telemetry:telemetry@localhost:15432/telemetry` | PostgreSQL connection string |
+| `POSTGRES_DSN` | *(built from `.env` vars)* | PostgreSQL connection string |
 
 Inside the Docker Compose network the containers use the internal Kafka address (`redpanda:9092`). The external port `19092` is for tooling running on the host.
 
@@ -322,6 +347,6 @@ Inside the Docker Compose network the containers use the internal Kafka address 
 ## Security Notes
 
 - PostgreSQL rejects all non-SSL TCP connections from remote hosts (`pg_hba.conf`).
-- The default credentials (`telemetry` / `telemetry`) are suitable for a lab environment. Change them for production by updating the `docker-compose.yml` environment variables and the `POSTGRES_DSN` in the consumer.
+- Credentials are controlled by `.env`. Change `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` there before first start — the `postgres` container and the consumer DSN both pick them up automatically.
 - The gRPC listener on port 57400 is unauthenticated — restrict access to trusted network segments via firewall or ACL rules.
 - The Nginx certificate is self-signed. Replace it with a certificate from your organisation's CA for production use.
