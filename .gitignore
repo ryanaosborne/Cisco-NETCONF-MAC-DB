@@ -3,3 +3,4 @@
 /certs/postgres
 /certs/saml
 .env
+backup_config
