@@ -109,12 +109,13 @@ services:
       context: .
       dockerfile: collector/Dockerfile
     container_name: collector
-    ports:
-      - "57400:57400"     # Cisco MDT default port
     environment:
       KAFKA_BROKER: redpanda:9092
+      DEVICES_FILE: /app/devices.yaml
       GRPC_GO_LOG_VERBOSITY_LEVEL: "99"
       GRPC_GO_LOG_SEVERITY_LEVEL: "info"
+    volumes:
+      - ./devices.yaml:/app/devices.yaml:ro
     depends_on:
       redpanda:
         condition: service_healthy

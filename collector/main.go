@@ -2,26 +2,59 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/IBM/sarama"
+	gnmipb "github.com/openconfig/gnmi/proto/gnmi"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
-
-	telpb "telemetry/proto"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"gopkg.in/yaml.v3"
 )
 
-// ── Kafka config ────────────────────────────────────────────────────────────
+// ── Device config (from YAML) ────────────────────────────────────────────────
+
+type DevicesFile struct {
+	Devices []DeviceConfig `yaml:"devices"`
+}
+
+type DeviceConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	NodeID   string `yaml:"node_id"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	TLS      bool   `yaml:"tls"`
+	CACert   string `yaml:"ca_cert,omitempty"`
+}
+
+func loadDevices(path string) ([]DeviceConfig, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var df DevicesFile
+	if err := yaml.NewDecoder(f).Decode(&df); err != nil {
+		return nil, err
+	}
+	return df.Devices, nil
+}
+
+// ── Kafka ────────────────────────────────────────────────────────────────────
 
 func newKafkaProducer(brokers []string) (sarama.SyncProducer, error) {
 	cfg := sarama.NewConfig()
@@ -32,7 +65,7 @@ func newKafkaProducer(brokers []string) (sarama.SyncProducer, error) {
 	return sarama.NewSyncProducer(brokers, cfg)
 }
 
-// ── Payload structs (what we publish to Kafka) ──────────────────────────────
+// ── Kafka payload structs (consumer expects these exact shapes) ───────────────
 
 type MacEntry struct {
 	Timestamp  time.Time `json:"timestamp"`
@@ -40,7 +73,7 @@ type MacEntry struct {
 	MacAddress string    `json:"mac_address"`
 	Interface  string    `json:"interface"`
 	Vlan       uint32    `json:"vlan"`
-	Type       string    `json:"type"` // dynamic / static
+	Type       string    `json:"type"`
 }
 
 type VlanEntry struct {
@@ -72,81 +105,414 @@ type IfEntry struct {
 	MTU         uint32    `json:"mtu,omitempty"`
 }
 
-// ── gRPC server ─────────────────────────────────────────────────────────────
+// ── JSON_IETF unmarshal types ─────────────────────────────────────────────────
 
-type telemetryServer struct {
-	telpb.UnimplementedGRPCMdtDialoutServer
+type jsonMacEntry struct {
+	VlanID    uint32 `json:"vlan-id-number"`
+	Mac       string `json:"mac-address"`
+	Interface string `json:"interface"`
+	Type      string `json:"mat-addr-type"`
+}
+
+type jsonArpEntry struct {
+	Address   string `json:"address"`
+	Hardware  string `json:"hardware"`
+	Interface string `json:"interface"`
+	TTL       uint32 `json:"time-to-live"`
+}
+
+type jsonVlanState struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type jsonVlan struct {
+	VlanID uint32        `json:"vlan-id"`
+	State  jsonVlanState `json:"state"`
+}
+
+type jsonIfEntry struct {
+	Name        json.RawMessage  `json:"name"`
+	Description string           `json:"description"`
+	Shutdown    *json.RawMessage `json:"shutdown"` // presence container: non-nil = shutdown
+	MTU         uint32           `json:"mtu"`
+	VRF         *struct {
+		Forwarding string `json:"forwarding"`
+	} `json:"vrf"`
+	IP *struct {
+		Address *struct {
+			Primary *struct {
+				Address string `json:"address"`
+				Mask    string `json:"mask"`
+			} `json:"primary"`
+		} `json:"address"`
+	} `json:"ip"`
+}
+
+// ── gNMI subscriptions ────────────────────────────────────────────────────────
+
+type subSpec struct {
+	path     string
+	mode     gnmipb.SubscriptionMode
+	interval time.Duration // only meaningful for SAMPLE
+}
+
+var subscriptions = []subSpec{
+	{
+		path:     "Cisco-IOS-XE-matm-oper:matm-oper-data/matm-table/matm-mac-entry",
+		mode:     gnmipb.SubscriptionMode_SAMPLE,
+		interval: 60 * time.Second,
+	},
+	{
+		path:     "Cisco-IOS-XE-arp-oper:arp-data/arp-vrf/arp-entry",
+		mode:     gnmipb.SubscriptionMode_SAMPLE,
+		interval: 60 * time.Second,
+	},
+	{
+		path:  "Cisco-IOS-XE-native:native/interface",
+		mode:  gnmipb.SubscriptionMode_ON_CHANGE,
+	},
+	{
+		path:     "openconfig-vlan:vlans/vlan",
+		mode:     gnmipb.SubscriptionMode_SAMPLE,
+		interval: 60 * time.Second,
+	},
+}
+
+// parsePath converts "module:path/to/leaf" into a *gnmipb.Path with origin set.
+func parsePath(s string) *gnmipb.Path {
+	origin, rest := "", s
+	if idx := strings.Index(s, ":"); idx != -1 {
+		origin = s[:idx]
+		rest = s[idx+1:]
+	}
+	var elems []*gnmipb.PathElem
+	for _, part := range strings.Split(strings.Trim(rest, "/"), "/") {
+		if part != "" {
+			elems = append(elems, &gnmipb.PathElem{Name: part})
+		}
+	}
+	return &gnmipb.Path{Origin: origin, Elem: elems}
+}
+
+// ── Subscriber ────────────────────────────────────────────────────────────────
+
+type subscriber struct {
+	dev      DeviceConfig
 	producer sarama.SyncProducer
 }
 
-// MdtDialout is the single streaming RPC Cisco calls.
-// Each Recv() returns one Telemetry message covering one collection interval.
-func (s *telemetryServer) MdtDialout(stream telpb.GRPCMdtDialout_MdtDialoutServer) error {
-	log.Printf("MdtDialout stream opened")
-	for {
-		args, err := stream.Recv()
+func (s *subscriber) nodeID() string {
+	if s.dev.NodeID != "" {
+		return s.dev.NodeID
+	}
+	return s.dev.Host
+}
+
+func (s *subscriber) dialOpts() ([]grpc.DialOption, error) {
+	if !s.dev.TLS {
+		return []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		}, nil
+	}
+	tlsCfg := &tls.Config{}
+	if s.dev.CACert != "" {
+		pem, err := os.ReadFile(s.dev.CACert)
 		if err != nil {
-			log.Printf("stream recv error: %v", err)
-			return status.Errorf(codes.Unavailable, "stream closed: %v", err)
+			return nil, fmt.Errorf("read ca_cert: %w", err)
 		}
-		if len(args.Data) == 0 {
-			continue
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ca_cert: no valid PEM certificates found")
 		}
-		msg := &telpb.Telemetry{}
-		if err := proto.Unmarshal(args.Data, msg); err != nil {
-			log.Printf("unmarshal telemetry: %v", err)
-			continue
+		tlsCfg.RootCAs = pool
+	}
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+	}, nil
+}
+
+// run keeps the subscription alive with reconnect backoff until ctx is cancelled.
+func (s *subscriber) run(ctx context.Context) {
+	nid := s.nodeID()
+	for {
+		if err := s.connect(ctx, nid); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[%s] disconnected: %v — retrying in 30s", nid, err)
 		}
-		log.Printf("received msg from %s collection_id=%d path=%s", msg.NodeIdStr, msg.CollectionId, msg.EncodingPath)
-		if err := s.dispatch(msg); err != nil {
-			log.Printf("dispatch error for node %s: %v", msg.NodeIdStr, err)
-		}
-		if err := stream.Send(&telpb.MdtDialoutResponse{}); err != nil {
-			log.Printf("ack send failed (non-fatal): %v", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
 		}
 	}
 }
 
-// dispatch routes a Telemetry message to the correct topic parser
-func (s *telemetryServer) dispatch(t *telpb.Telemetry) error {
+func (s *subscriber) connect(ctx context.Context, nid string) error {
+	opts, err := s.dialOpts()
+	if err != nil {
+		return err
+	}
+	addr := fmt.Sprintf("%s:%d", s.dev.Host, s.dev.Port)
+	conn, err := grpc.NewClient(addr, opts...)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	log.Printf("[%s] connected to %s", nid, addr)
+
+	ctx = metadata.AppendToOutgoingContext(ctx,
+		"username", s.dev.Username,
+		"password", s.dev.Password,
+	)
+
+	client := gnmipb.NewGNMIClient(conn)
+	stream, err := client.Subscribe(ctx)
+	if err != nil {
+		return fmt.Errorf("Subscribe: %w", err)
+	}
+
+	subs := make([]*gnmipb.Subscription, 0, len(subscriptions))
+	for _, spec := range subscriptions {
+		sub := &gnmipb.Subscription{
+			Path: parsePath(spec.path),
+			Mode: spec.mode,
+		}
+		if spec.mode == gnmipb.SubscriptionMode_SAMPLE {
+			sub.SampleInterval = uint64(spec.interval)
+		}
+		subs = append(subs, sub)
+	}
+
+	if err := stream.Send(&gnmipb.SubscribeRequest{
+		Request: &gnmipb.SubscribeRequest_Subscribe{
+			Subscribe: &gnmipb.SubscriptionList{
+				Mode:         gnmipb.SubscriptionList_STREAM,
+				Encoding:     gnmipb.Encoding_JSON_IETF,
+				Subscription: subs,
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("send SubscribeRequest: %w", err)
+	}
+
+	log.Printf("[%s] subscribed to %d paths", nid, len(subscriptions))
+
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF || ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("Recv: %w", err)
+		}
+		switch r := resp.Response.(type) {
+		case *gnmipb.SubscribeResponse_Update:
+			notif := r.Update
+			ts := time.Unix(0, notif.Timestamp)
+			for _, upd := range notif.Update {
+				if err := s.dispatch(upd, nid, ts); err != nil {
+					log.Printf("[%s] dispatch: %v", nid, err)
+				}
+			}
+		case *gnmipb.SubscribeResponse_SyncResponse:
+			log.Printf("[%s] initial sync complete", nid)
+		}
+	}
+}
+
+// dispatch routes an Update to the correct parser by path origin and tail element.
+func (s *subscriber) dispatch(upd *gnmipb.Update, nid string, ts time.Time) error {
+	val := upd.Val.GetJsonIetfVal()
+	if len(val) == 0 {
+		return nil
+	}
+	var origin, tail string
+	if p := upd.Path; p != nil {
+		origin = p.Origin
+		if len(p.Elem) > 0 {
+			tail = p.Elem[len(p.Elem)-1].Name
+		}
+	}
 	switch {
-	case isMAC(t.EncodingPath):
-		return s.publishMAC(t)
-	case isARP(t.EncodingPath):
-		return s.publishARP(t)
-	case isInterface(t.EncodingPath):
-		return s.publishInterface(t)
-	case isVlan(t.EncodingPath):
-		return s.publishVlan(t)
+	case origin == "Cisco-IOS-XE-matm-oper" || tail == "matm-mac-entry":
+		return s.publishMAC(val, nid, ts)
+	case origin == "Cisco-IOS-XE-arp-oper" || tail == "arp-entry":
+		return s.publishARP(val, nid, ts)
+	case origin == "Cisco-IOS-XE-native" || tail == "interface":
+		return s.publishInterface(val, nid, ts)
+	case origin == "openconfig-vlan" || tail == "vlan":
+		return s.publishVlan(val, nid, ts)
 	default:
-		log.Printf("unhandled path: %s", t.EncodingPath)
+		log.Printf("[%s] unhandled path origin=%q tail=%q", nid, origin, tail)
 		return nil
 	}
 }
 
-func isMAC(path string) bool {
-	// IOS-XE path for MAC address table entries
-	return path == "Cisco-IOS-XE-matm-oper:matm-oper-data/matm-table/matm-mac-entry"
+// unwrapList decodes a JSON payload as a slice of entries. Cisco IOS-XE gNMI
+// responses are either a bare JSON array or a single-key wrapper object
+// (namespace-prefixed key pointing to the array), so we handle both.
+func unwrapList(payload []byte) []json.RawMessage {
+	var arr []json.RawMessage
+	if json.Unmarshal(payload, &arr) == nil {
+		return arr
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(payload, &obj) == nil {
+		for _, v := range obj {
+			var inner []json.RawMessage
+			if json.Unmarshal(v, &inner) == nil {
+				return inner
+			}
+			return []json.RawMessage{v}
+		}
+	}
+	return []json.RawMessage{payload}
 }
 
-func isARP(path string) bool {
-	return path == "Cisco-IOS-XE-arp-oper:arp-data/arp-vrf/arp-entry" ||
-		path == "arp-ios-xe-oper:arp-data/arp-vrf/arp-entry"
+// ── MAC ───────────────────────────────────────────────────────────────────────
+
+func (s *subscriber) publishMAC(payload []byte, nid string, ts time.Time) error {
+	for _, raw := range unwrapList(payload) {
+		var e jsonMacEntry
+		if json.Unmarshal(raw, &e) != nil || e.Mac == "" {
+			continue
+		}
+		if err := s.publish("mac-table", e.Mac, MacEntry{
+			Timestamp:  ts,
+			NodeID:     nid,
+			MacAddress: e.Mac,
+			Interface:  expandIfName(e.Interface),
+			Vlan:       e.VlanID,
+			Type:       e.Type,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func isInterface(path string) bool {
-	return path == "Cisco-IOS-XE-native:native/interface"
+// ── ARP ───────────────────────────────────────────────────────────────────────
+
+func (s *subscriber) publishARP(payload []byte, nid string, ts time.Time) error {
+	for _, raw := range unwrapList(payload) {
+		var e jsonArpEntry
+		if json.Unmarshal(raw, &e) != nil || e.Address == "" {
+			continue
+		}
+		if err := s.publish("arp-table", e.Address, ArpEntry{
+			Timestamp:  ts,
+			NodeID:     nid,
+			IPAddress:  e.Address,
+			MacAddress: e.Hardware,
+			Interface:  expandIfName(e.Interface),
+			Age:        e.TTL,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func isVlan(path string) bool {
-	return path == "openconfig-vlan:vlans/vlan"
+// ── Interface ─────────────────────────────────────────────────────────────────
+
+func (s *subscriber) publishInterface(payload []byte, nid string, ts time.Time) error {
+	// Top-level JSON is { "ifType": [...], ... } or wrapped as
+	// { "Cisco-IOS-XE-native:interface": { "ifType": [...], ... } }.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &top); err != nil {
+		return fmt.Errorf("interface: %w", err)
+	}
+	// Unwrap single-key namespace wrapper if present.
+	if len(top) == 1 {
+		for _, v := range top {
+			var inner map[string]json.RawMessage
+			if json.Unmarshal(v, &inner) == nil {
+				top = inner
+			}
+		}
+	}
+	for ifType, listRaw := range top {
+		if idx := strings.Index(ifType, ":"); idx != -1 {
+			ifType = ifType[idx+1:]
+		}
+		for _, raw := range unwrapList(listRaw) {
+			var e jsonIfEntry
+			if json.Unmarshal(raw, &e) != nil {
+				continue
+			}
+			name := parseIfName(ifType, e.Name)
+			if name == "" {
+				continue
+			}
+			entry := IfEntry{
+				Timestamp:   ts,
+				NodeID:      nid,
+				Name:        name,
+				Description: e.Description,
+				Shutdown:    e.Shutdown != nil,
+				MTU:         e.MTU,
+			}
+			if e.VRF != nil {
+				entry.VRF = e.VRF.Forwarding
+			}
+			if e.IP != nil && e.IP.Address != nil && e.IP.Address.Primary != nil {
+				entry.IPAddress = e.IP.Address.Primary.Address
+				entry.PrefixLen = maskToPrefixLen(e.IP.Address.Primary.Mask)
+			}
+			if err := s.publish("interface-table", nid+"/"+name, entry); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
+// parseIfName converts ifType + raw JSON name (string or number) into a full
+// interface name. Vlan and Port-channel use integer names; physical ports use strings.
+func parseIfName(ifType string, raw json.RawMessage) string {
+	if raw == nil {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return ifType + s
+	}
+	var n json.Number
+	if json.Unmarshal(raw, &n) == nil {
+		return ifType + n.String()
+	}
+	return ""
+}
 
-// expandIfName converts Cisco abbreviated interface names (e.g. "Gi1/0/1",
-// "Te1/1/1") to their full forms so they match what the interface parser stores.
+// ── VLAN ──────────────────────────────────────────────────────────────────────
+
+func (s *subscriber) publishVlan(payload []byte, nid string, ts time.Time) error {
+	for _, raw := range unwrapList(payload) {
+		var e jsonVlan
+		if json.Unmarshal(raw, &e) != nil || e.VlanID == 0 {
+			continue
+		}
+		if err := s.publish("vlan-table", fmt.Sprintf("%s/%d", nid, e.VlanID), VlanEntry{
+			Timestamp: ts,
+			NodeID:    nid,
+			VlanID:    e.VlanID,
+			Name:      e.State.Name,
+			Status:    e.State.Status,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 func expandIfName(s string) string {
-	prefixes := [][2]string{
+	for _, p := range [][2]string{
 		{"GigabitEthernet", "Gi"},
 		{"TenGigabitEthernet", "Te"},
 		{"FastEthernet", "Fa"},
@@ -157,8 +523,7 @@ func expandIfName(s string) string {
 		{"Loopback", "Lo"},
 		{"Vlan", "Vl"},
 		{"Tunnel", "Tu"},
-	}
-	for _, p := range prefixes {
+	} {
 		full, abbr := p[0], p[1]
 		if len(s) > len(abbr) && s[:len(abbr)] == abbr && s[len(abbr)] >= '0' && s[len(abbr)] <= '9' {
 			return full + s[len(abbr):]
@@ -167,113 +532,6 @@ func expandIfName(s string) string {
 	return s
 }
 
-// ── MAC table parser ─────────────────────────────────────────────────────────
-
-func (s *telemetryServer) publishMAC(t *telpb.Telemetry) error {
-	ts := time.UnixMilli(int64(t.MsgTimestamp))
-	for _, row := range t.DataGpbkv {
-		entry := MacEntry{
-			Timestamp: ts,
-			NodeID:    t.NodeIdStr,
-		}
-		// Cisco GPB-KV nests leaf values one level deep inside "keys"/"content"
-		// containers, so we walk both levels.
-		applyMAC := func(f *telpb.TelemetryField) {
-			switch f.Name {
-			case "mac", "mac-address":
-				entry.MacAddress = f.GetStringValue()
-			case "port", "interface":
-				entry.Interface = expandIfName(f.GetStringValue())
-			case "vlan-id-number", "vlan-id":
-				entry.Vlan = f.GetUint32Value()
-			case "mat-addr-type", "mac-type":
-				entry.Type = f.GetStringValue()
-			}
-		}
-		for _, container := range row.Fields {
-			if len(container.Fields) > 0 {
-				for _, f := range container.Fields {
-					applyMAC(f)
-				}
-			} else {
-				applyMAC(container)
-			}
-		}
-		if entry.MacAddress == "" {
-			continue
-		}
-		if err := s.publish("mac-table", entry.MacAddress, entry); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ── ARP table parser ─────────────────────────────────────────────────────────
-
-func (s *telemetryServer) publishARP(t *telpb.Telemetry) error {
-	ts := time.UnixMilli(int64(t.MsgTimestamp))
-	for _, row := range t.DataGpbkv {
-		entry := ArpEntry{
-			Timestamp: ts,
-			NodeID:    t.NodeIdStr,
-		}
-		applyARP := func(f *telpb.TelemetryField) {
-			switch f.Name {
-			case "address":
-				entry.IPAddress = f.GetStringValue()
-			case "hardware":
-				entry.MacAddress = f.GetStringValue()
-			case "interface":
-				entry.Interface = expandIfName(f.GetStringValue())
-			case "time-to-live":
-				entry.Age = f.GetUint32Value()
-			}
-		}
-		for _, container := range row.Fields {
-			if len(container.Fields) > 0 {
-				for _, f := range container.Fields {
-					applyARP(f)
-				}
-			} else {
-				applyARP(container)
-			}
-		}
-		if entry.IPAddress == "" {
-			continue
-		}
-		if err := s.publish("arp-table", entry.IPAddress, entry); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ── Interface config parser ──────────────────────────────────────────────────
-
-// findNestedField follows a sequence of field names through the GPB-KV tree.
-func findNestedField(fields []*telpb.TelemetryField, path ...string) *telpb.TelemetryField {
-	cur := fields
-	for i, name := range path {
-		var match *telpb.TelemetryField
-		for _, f := range cur {
-			if f.Name == name {
-				match = f
-				break
-			}
-		}
-		if match == nil {
-			return nil
-		}
-		if i == len(path)-1 {
-			return match
-		}
-		cur = match.Fields
-	}
-	return nil
-}
-
-// maskToPrefixLen converts a dotted-decimal subnet mask to a prefix length.
 func maskToPrefixLen(mask string) int {
 	ip := net.ParseIP(mask).To4()
 	if ip == nil {
@@ -283,135 +541,32 @@ func maskToPrefixLen(mask string) int {
 	return ones
 }
 
-func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
-	ts := time.UnixMilli(int64(t.MsgTimestamp))
-	for _, row := range t.DataGpbkv {
-		// The native interface container sends all interface entries inside a
-		// single "content" field. Each child of content is named after the
-		// interface type (GigabitEthernet, Vlan, Port-channel, etc.) and holds
-		// the per-interface config — including the "name" key — as flat siblings.
-		var content *telpb.TelemetryField
-		for _, f := range row.Fields {
-			if f.Name == "content" {
-				content = f
-				break
-			}
-		}
-		if content == nil {
-			continue
-		}
-		for _, iface := range content.Fields {
-			ifType := iface.Name // e.g. "GigabitEthernet", "Vlan", "Port-channel"
-			entry := IfEntry{
-				Timestamp: ts,
-				NodeID:    t.NodeIdStr,
-			}
-			for _, f := range iface.Fields {
-				switch f.Name {
-				case "name":
-					// GigabitEthernet uses string (e.g. "1/0/1"); Vlan and
-					// Port-channel use uint32, so we check both.
-					if sv := f.GetStringValue(); sv != "" {
-						entry.Name = ifType + sv
-					} else {
-						entry.Name = fmt.Sprintf("%s%d", ifType, f.GetUint32Value())
-					}
-				case "description":
-					entry.Description = f.GetStringValue()
-				case "mtu":
-					entry.MTU = f.GetUint32Value()
-				case "shutdown":
-					entry.Shutdown = true
-				case "vrf":
-					if fw := findNestedField(f.Fields, "forwarding"); fw != nil {
-						entry.VRF = fw.GetStringValue()
-					}
-				case "ip":
-					if addr := findNestedField(f.Fields, "address", "primary", "address"); addr != nil {
-						entry.IPAddress = addr.GetStringValue()
-					}
-					if mask := findNestedField(f.Fields, "address", "primary", "mask"); mask != nil {
-						entry.PrefixLen = maskToPrefixLen(mask.GetStringValue())
-					}
-				}
-			}
-			if entry.Name == "" {
-				continue
-			}
-			if err := s.publish("interface-table", entry.NodeID+"/"+entry.Name, entry); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// ── VLAN parser ──────────────────────────────────────────────────────────────
-
-func (s *telemetryServer) publishVlan(t *telpb.Telemetry) error {
-	ts := time.UnixMilli(int64(t.MsgTimestamp))
-	for _, row := range t.DataGpbkv {
-		entry := VlanEntry{
-			Timestamp: ts,
-			NodeID:    t.NodeIdStr,
-		}
-		for _, container := range row.Fields {
-			switch container.Name {
-			case "keys":
-				if f := findNestedField(container.Fields, "vlan-id"); f != nil {
-					entry.VlanID = f.GetUint32Value()
-				}
-			case "content":
-				// state always carries name (synthesized as "VLANxxxx" if not configured)
-				// and status; config may omit name, so we prefer state.
-				for _, sub := range container.Fields {
-					if sub.Name == "state" {
-						for _, f := range sub.Fields {
-							switch f.Name {
-							case "name":
-								entry.Name = f.GetStringValue()
-							case "status":
-								entry.Status = f.GetStringValue()
-							}
-						}
-						break
-					}
-				}
-			}
-		}
-		if entry.VlanID == 0 {
-			continue
-		}
-		key := fmt.Sprintf("%s/%d", entry.NodeID, entry.VlanID)
-		if err := s.publish("vlan-table", key, entry); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-
-// ── Kafka publish helper ─────────────────────────────────────────────────────
-
-func (s *telemetryServer) publish(topic, key string, v any) error {
+func (s *subscriber) publish(topic, key string, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	msg := &sarama.ProducerMessage{
+	_, _, err = s.producer.SendMessage(&sarama.ProducerMessage{
 		Topic: topic,
 		Key:   sarama.StringEncoder(key),
 		Value: sarama.ByteEncoder(b),
-	}
-	_, _, err = s.producer.SendMessage(msg)
+	})
 	return err
 }
 
-// ── main ─────────────────────────────────────────────────────────────────────
+// ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
 	broker := envOr("KAFKA_BROKER", "localhost:19092")
-	grpcAddr := envOr("GRPC_ADDR", ":57400") // 57400 is the Cisco MDT default port
+	devicesFile := envOr("DEVICES_FILE", "devices.yaml")
+
+	devices, err := loadDevices(devicesFile)
+	if err != nil {
+		log.Fatalf("load devices: %v", err)
+	}
+	if len(devices) == 0 {
+		log.Fatalf("no devices configured in %s", devicesFile)
+	}
 
 	producer, err := newKafkaProducer([]string{broker})
 	if err != nil {
@@ -419,29 +574,21 @@ func main() {
 	}
 	defer producer.Close()
 
-	rawLis, err := net.Listen("tcp", grpcAddr)
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
-	lis := &connLogListener{rawLis}
-
-	srv := grpc.NewServer()
-	telpb.RegisterGRPCMdtDialoutServer(srv, &telemetryServer{producer: producer})
-
-	log.Printf("collector listening on %s for Cisco MDT streams", grpcAddr)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		if err := srv.Serve(lis); err != nil {
-			log.Printf("grpc serve: %v", err)
-		}
-	}()
+	var wg sync.WaitGroup
+	for _, dev := range devices {
+		wg.Add(1)
+		go func(d DeviceConfig) {
+			defer wg.Done()
+			(&subscriber{dev: d, producer: producer}).run(ctx)
+		}(dev)
+	}
 
 	<-ctx.Done()
 	log.Println("shutting down collector...")
-	srv.GracefulStop()
+	wg.Wait()
 	log.Println("collector stopped")
 }
 
@@ -450,39 +597,4 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// connLogListener wraps net.Listener to log source IP and first bytes of every connection.
-type connLogListener struct{ net.Listener }
-
-func (l *connLogListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	return &connLogConn{Conn: conn, maxDump: 2048}, nil
-}
-
-type connLogConn struct {
-	net.Conn
-	mu      sync.Mutex
-	total   int
-	maxDump int
-}
-
-func (c *connLogConn) Read(b []byte) (int, error) {
-	n, err := c.Conn.Read(b)
-	if n > 0 {
-		c.mu.Lock()
-		if c.total < c.maxDump {
-			end := c.total + n
-			if end > c.maxDump {
-				end = c.maxDump
-			}
-			log.Printf("bytes[%d-%d] from %s: %x", c.total, end, c.RemoteAddr(), b[:end-c.total])
-		}
-		c.total += n
-		c.mu.Unlock()
-	}
-	return n, err
 }

@@ -1,0 +1,17 @@
+devices:
+  # Non-TLS example (lab / trusted network)
+  - host: 10.196.10.200
+    port: 57400
+    node_id: eve_switch
+    username: cisco
+    password: password
+    tls: false
+
+  # TLS example — provide the CA cert that signed the device's gNMI certificate
+  # - host: 192.168.1.11
+  #   port: 57400
+  #   node_id: access-sw-1
+  #   username: admin
+  #   password: changeme
+  #   tls: true
+  #   ca_cert: ./certs/gnmi/ca.crt
