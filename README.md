@@ -90,7 +90,6 @@ Unknown paths are logged and dropped.
 - `openssl` (for certificate generation)
 - `psql` or any PostgreSQL client (for running migrations)
   ```
-  sudo apt-get install -y postgresql-client-common
   sudo apt-get install -y postgresql-client
   ```
 
@@ -134,15 +133,50 @@ docker compose restart postgres
 
 ### 2. Configure Credentials
 
-Copy the example below to `.env` in the project root and set your own values before starting the stack:
+Copy `example.env` to `.env` in the project root and fill in your values before starting the stack:
 
 ```bash
-POSTGRES_USER=telemetry
-POSTGRES_PASSWORD=telemetry
-POSTGRES_DB=telemetry
+cp example.env .env
+# then edit .env with your credentials and settings
 ```
 
-Docker Compose reads this file automatically. The `postgres` container and the `consumer`'s `POSTGRES_DSN` both interpolate these variables at startup.
+Docker Compose reads `.env` automatically. The `postgres` container and the `consumer`'s `POSTGRES_DSN` both interpolate these variables at startup. The `.env` file is **not** tracked in git — `example.env` contains the template.
+
+### 2.5. Configure SAML Authentication (optional)
+
+PortFinder supports optional SAML 2.0 authentication via Azure AD (Entra ID). It is disabled by default — set `SAML_ENABLED=true` in `.env` to turn it on.
+
+**Generate an SP signing certificate** (if you don't already have one):
+
+```bash
+mkdir -p certs/saml
+openssl req -x509 -newkey rsa:2048 \
+  -keyout certs/saml/sp.key \
+  -out certs/saml/sp.crt \
+  -days 3650 -nodes \
+  -subj "/CN=portfinder-sp"
+```
+
+**Register the app in Azure AD** (Entra ID → Enterprise Applications → New application → Create your own → integrate any other application):
+
+| Azure AD field | Value |
+|---|---|
+| Identifier (Entity ID) | `https://<SAML_SP_ROOT_URL>/saml/metadata` |
+| Reply URL (ACS) | `https://<SAML_SP_ROOT_URL>/saml/acs` |
+
+After saving, copy the **App Federation Metadata URL** from the SAML Certificates section — this is your `SAML_IDP_METADATA_URL` value.
+
+**Set the following in `.env`:**
+
+```bash
+SAML_ENABLED=true
+SAML_IDP_METADATA_URL=https://login.microsoftonline.com/<TENANT_ID>/federationmetadata/2007-06/federationmetadata.xml?appid=<APP_ID>
+SAML_SP_ROOT_URL=https://your-app.example.com
+SAML_SP_CERT_FILE=./certs/saml/sp.crt
+SAML_SP_KEY_FILE=./certs/saml/sp.key
+```
+
+When enabled, all routes (`/`, `/swagger`, `/api/search`) require a valid Azure AD session. The `/saml/` callback routes and `/api/openapi.json` are always accessible without authentication.
 
 ### 3. Start the Stack
 
@@ -414,15 +448,27 @@ docker compose stop kafka-ui && docker compose up -d nginx
 
 ## Environment Variables
 
-### `.env` (Docker Compose credentials)
+### `.env` (Docker Compose)
 
-Docker Compose reads `.env` from the project root automatically.
+Copy `example.env` to `.env` and edit it. Docker Compose reads it automatically from the project root; the file is not tracked in git.
+
+**Database**
 
 | Variable | Description |
 |----------|-------------|
-| `POSTGRES_USER` | PostgreSQL username (used by `postgres` container and consumer DSN) |
+| `POSTGRES_USER` | PostgreSQL username |
 | `POSTGRES_PASSWORD` | PostgreSQL password |
 | `POSTGRES_DB` | PostgreSQL database name |
+
+**SAML / Azure AD (webapp)**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAML_ENABLED` | `false` | Set to `true` to require Azure AD login |
+| `SAML_IDP_METADATA_URL` | *(none)* | App Federation Metadata URL from Azure AD |
+| `SAML_SP_ROOT_URL` | *(none)* | Public base URL of the app, e.g. `https://portfinder.example.com` |
+| `SAML_SP_CERT_FILE` | `./certs/saml/sp.crt` | Path to SP signing certificate (PEM) |
+| `SAML_SP_KEY_FILE` | `./certs/saml/sp.key` | Path to SP private key (PEM) |
 
 ### Collector
 | Variable | Default | Description |
@@ -443,6 +489,7 @@ Inside the Docker Compose network the containers use the internal Kafka address 
 ## Security Notes
 
 - PostgreSQL rejects all non-SSL TCP connections from remote hosts (`pg_hba.conf`).
-- Credentials are controlled by `.env`. Change `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` there before first start — the `postgres` container and the consumer DSN both pick them up automatically.
+- Credentials are controlled by `.env`. Change `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` there before first start — the `postgres` container and the consumer DSN both pick them up automatically. The `.env` file is excluded from git; never commit it.
 - The gRPC listener on port 57400 is unauthenticated — restrict access to trusted network segments via firewall or ACL rules.
 - The Nginx certificate is self-signed. Replace it with a certificate from your organisation's CA for production use.
+- When `SAML_ENABLED=true`, PortFinder requires a valid Azure AD session for all search and UI routes. The SAML SP certificate in `certs/saml/` is excluded from git and should be kept private.

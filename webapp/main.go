@@ -2,15 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	_ "embed"
 	"encoding/json"
 	"fmt"
-	_ "embed"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 
+	"github.com/crewjam/saml/samlsp"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -191,6 +196,62 @@ func handleSearch(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// setupSAML initialises the SAML middleware when SAML_ENABLED=true.
+// Returns nil (no-op) when the feature is disabled.
+func setupSAML() *samlsp.Middleware {
+	if os.Getenv("SAML_ENABLED") != "true" {
+		return nil
+	}
+
+	certFile := envOr("SAML_SP_CERT_FILE", "./certs/saml/sp.crt")
+	keyFile := envOr("SAML_SP_KEY_FILE", "./certs/saml/sp.key")
+
+	keyPair, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		log.Fatalf("saml: load cert/key: %v", err)
+	}
+	keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
+	if err != nil {
+		log.Fatalf("saml: parse cert: %v", err)
+	}
+
+	idpMetadataRaw := os.Getenv("SAML_IDP_METADATA_URL")
+	if idpMetadataRaw == "" {
+		log.Fatal("saml: SAML_IDP_METADATA_URL must be set when SAML_ENABLED=true")
+	}
+	idpMetadataURL, err := url.Parse(idpMetadataRaw)
+	if err != nil {
+		log.Fatalf("saml: parse IDP metadata URL: %v", err)
+	}
+
+	rootURLRaw := os.Getenv("SAML_SP_ROOT_URL")
+	if rootURLRaw == "" {
+		log.Fatal("saml: SAML_SP_ROOT_URL must be set when SAML_ENABLED=true")
+	}
+	rootURL, err := url.Parse(rootURLRaw)
+	if err != nil {
+		log.Fatalf("saml: parse SP root URL: %v", err)
+	}
+
+	idpMetadata, err := samlsp.FetchMetadata(context.Background(), http.DefaultClient, *idpMetadataURL)
+	if err != nil {
+		log.Fatalf("saml: fetch IDP metadata from %s: %v", idpMetadataRaw, err)
+	}
+
+	middleware, err := samlsp.New(samlsp.Options{
+		URL:         *rootURL,
+		Key:         keyPair.PrivateKey.(*rsa.PrivateKey),
+		Certificate: keyPair.Leaf,
+		IDPMetadata: idpMetadata,
+	})
+	if err != nil {
+		log.Fatalf("saml: init middleware: %v", err)
+	}
+
+	log.Printf("saml: enabled, SP entity ID: %s/saml/metadata", rootURLRaw)
+	return middleware
+}
+
 func main() {
 	dsn := envOr("POSTGRES_DSN", "postgres://telemetry:telemetry@localhost:15432/telemetry?sslmode=require")
 
@@ -204,20 +265,35 @@ func main() {
 		log.Fatalf("postgres ping: %v", err)
 	}
 
+	samlMiddleware := setupSAML()
+
+	// protect wraps a handler behind SAML when enabled; otherwise it's a no-op.
+	protect := func(h http.Handler) http.Handler {
+		if samlMiddleware == nil {
+			return h
+		}
+		return samlMiddleware.RequireAccount(h)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
+	if samlMiddleware != nil {
+		mux.Handle("/saml/", samlMiddleware)
+	}
+
+	mux.Handle("/", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, indexHTML)
-	})
-	mux.HandleFunc("/swagger", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/swagger", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, swaggerHTML)
-	})
+	})))
 	mux.HandleFunc("/api/openapi.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(openapiJSON)
 	})
-	mux.HandleFunc("/api/search", handleSearch(db))
+	mux.Handle("/api/search", protect(handleSearch(db)))
 
 	addr := envOr("LISTEN_ADDR", ":8888")
 	log.Printf("webapp listening on %s", addr)

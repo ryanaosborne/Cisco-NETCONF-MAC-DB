@@ -129,6 +129,13 @@ services:
     # Port not bound to host — accessible via nginx on port 443
     environment:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require
+      SAML_ENABLED: ${SAML_ENABLED:-false}
+      SAML_IDP_METADATA_URL: ${SAML_IDP_METADATA_URL:-}
+      SAML_SP_ROOT_URL: ${SAML_SP_ROOT_URL:-}
+      SAML_SP_CERT_FILE: /app/certs/saml/sp.crt
+      SAML_SP_KEY_FILE: /app/certs/saml/sp.key
+    volumes:
+      - ./certs/saml:/app/certs/saml:ro
     depends_on:
       postgres:
         condition: service_healthy
