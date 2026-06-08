@@ -14,6 +14,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/crewjam/saml/samlsp"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +26,9 @@ var indexHTML string
 //go:embed swagger.html
 var swaggerHTML string
 
+//go:embed dbview.html
+var dbviewHTML string
+
 //go:embed openapi.json
 var openapiJSON []byte
 
@@ -32,6 +36,188 @@ var (
 	macRe = regexp.MustCompile(`(?i)^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$|^[0-9a-f]{12}$`)
 	ipRe  = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}$`)
 )
+
+// Row types used by the DB inspector endpoint.
+type macRow struct {
+	ID          int64     `json:"id"`
+	NodeID      string    `json:"node_id"`
+	MacAddress  string    `json:"mac_address"`
+	Interface   *string   `json:"interface"`
+	Vlan        *int32    `json:"vlan"`
+	MacType     *string   `json:"mac_type"`
+	CollectedAt time.Time `json:"collected_at"`
+}
+
+type arpRow struct {
+	ID          int64     `json:"id"`
+	NodeID      string    `json:"node_id"`
+	IPAddress   string    `json:"ip_address"`
+	MacAddress  *string   `json:"mac_address"`
+	Interface   *string   `json:"interface"`
+	AgeSeconds  *int32    `json:"age_seconds"`
+	CollectedAt time.Time `json:"collected_at"`
+}
+
+type interfaceRow struct {
+	ID          int64     `json:"id"`
+	NodeID      string    `json:"node_id"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description"`
+	Shutdown    bool      `json:"shutdown"`
+	IPAddress   *string   `json:"ip_address"`
+	PrefixLen   *int16    `json:"prefix_len"`
+	VRF         *string   `json:"vrf"`
+	MTU         *int32    `json:"mtu"`
+	CollectedAt time.Time `json:"collected_at"`
+}
+
+type vlanRow struct {
+	ID          int64     `json:"id"`
+	NodeID      string    `json:"node_id"`
+	VlanID      int32     `json:"vlan_id"`
+	Name        *string   `json:"name"`
+	Status      *string   `json:"status"`
+	CollectedAt time.Time `json:"collected_at"`
+}
+
+type dbInspectResponse struct {
+	MacRows        []macRow       `json:"mac_rows"`
+	MacTotal       int            `json:"mac_total"`
+	ArpRows        []arpRow       `json:"arp_rows"`
+	ArpTotal       int            `json:"arp_total"`
+	InterfaceRows  []interfaceRow `json:"interface_rows"`
+	InterfaceTotal int            `json:"interface_total"`
+	VlanRows       []vlanRow      `json:"vlan_rows"`
+	VlanTotal      int            `json:"vlan_total"`
+}
+
+const dbInspectLimit = 500
+
+func handleDBInspect(db *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx := r.Context()
+		var resp dbInspectResponse
+
+		// mac_table
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM mac_table`).Scan(&resp.MacTotal); err != nil {
+			log.Printf("dbinspect: count mac: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		macRows, err := db.Query(ctx, `SELECT id,node_id,mac_address,interface,vlan,mac_type,collected_at FROM mac_table ORDER BY id DESC LIMIT $1`, dbInspectLimit)
+		if err != nil {
+			log.Printf("dbinspect: query mac: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		resp.MacRows = []macRow{}
+		for macRows.Next() {
+			var row macRow
+			if err := macRows.Scan(&row.ID, &row.NodeID, &row.MacAddress, &row.Interface, &row.Vlan, &row.MacType, &row.CollectedAt); err != nil {
+				log.Printf("dbinspect: scan mac: %v", err)
+				continue
+			}
+			resp.MacRows = append(resp.MacRows, row)
+		}
+		if err := macRows.Err(); err != nil {
+			log.Printf("dbinspect: rows mac: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		macRows.Close()
+
+		// arp_table
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM arp_table`).Scan(&resp.ArpTotal); err != nil {
+			log.Printf("dbinspect: count arp: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		arpRows, err := db.Query(ctx, `SELECT id,node_id,ip_address,mac_address,interface,age_seconds,collected_at FROM arp_table ORDER BY id DESC LIMIT $1`, dbInspectLimit)
+		if err != nil {
+			log.Printf("dbinspect: query arp: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		resp.ArpRows = []arpRow{}
+		for arpRows.Next() {
+			var row arpRow
+			if err := arpRows.Scan(&row.ID, &row.NodeID, &row.IPAddress, &row.MacAddress, &row.Interface, &row.AgeSeconds, &row.CollectedAt); err != nil {
+				log.Printf("dbinspect: scan arp: %v", err)
+				continue
+			}
+			resp.ArpRows = append(resp.ArpRows, row)
+		}
+		if err := arpRows.Err(); err != nil {
+			log.Printf("dbinspect: rows arp: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		arpRows.Close()
+
+		// interface_table
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM interface_table`).Scan(&resp.InterfaceTotal); err != nil {
+			log.Printf("dbinspect: count interface: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		ifaceRows, err := db.Query(ctx, `SELECT id,node_id,name,description,shutdown,ip_address,prefix_len,vrf,mtu,collected_at FROM interface_table ORDER BY id DESC LIMIT $1`, dbInspectLimit)
+		if err != nil {
+			log.Printf("dbinspect: query interface: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		resp.InterfaceRows = []interfaceRow{}
+		for ifaceRows.Next() {
+			var row interfaceRow
+			if err := ifaceRows.Scan(&row.ID, &row.NodeID, &row.Name, &row.Description, &row.Shutdown, &row.IPAddress, &row.PrefixLen, &row.VRF, &row.MTU, &row.CollectedAt); err != nil {
+				log.Printf("dbinspect: scan interface: %v", err)
+				continue
+			}
+			resp.InterfaceRows = append(resp.InterfaceRows, row)
+		}
+		if err := ifaceRows.Err(); err != nil {
+			log.Printf("dbinspect: rows interface: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		ifaceRows.Close()
+
+		// vlan_table
+		if err := db.QueryRow(ctx, `SELECT COUNT(*) FROM vlan_table`).Scan(&resp.VlanTotal); err != nil {
+			log.Printf("dbinspect: count vlan: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		vlanRows, err := db.Query(ctx, `SELECT id,node_id,vlan_id,name,status,collected_at FROM vlan_table ORDER BY id DESC LIMIT $1`, dbInspectLimit)
+		if err != nil {
+			log.Printf("dbinspect: query vlan: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		resp.VlanRows = []vlanRow{}
+		for vlanRows.Next() {
+			var row vlanRow
+			if err := vlanRows.Scan(&row.ID, &row.NodeID, &row.VlanID, &row.Name, &row.Status, &row.CollectedAt); err != nil {
+				log.Printf("dbinspect: scan vlan: %v", err)
+				continue
+			}
+			resp.VlanRows = append(resp.VlanRows, row)
+		}
+		if err := vlanRows.Err(); err != nil {
+			log.Printf("dbinspect: rows vlan: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		vlanRows.Close()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}
 
 type Result struct {
 	NodeID               string  `json:"node_id"`
@@ -294,6 +480,11 @@ func main() {
 		w.Write(openapiJSON)
 	})
 	mux.Handle("/api/search", protect(handleSearch(db)))
+	mux.Handle("/dbview", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, dbviewHTML)
+	})))
+	mux.Handle("/api/db-inspect", protect(handleDBInspect(db)))
 
 	addr := envOr("LISTEN_ADDR", ":8888")
 	log.Printf("webapp listening on %s", addr)
