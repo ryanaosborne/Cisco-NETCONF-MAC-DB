@@ -464,7 +464,8 @@ Copy `example.env` to `.env` and edit it. Docker Compose reads it automatically 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATA_TTL` | `5m` | How long to retain telemetry rows before the consumer purges them (Go duration syntax, e.g. `5m`, `1h`). Active entries are refreshed on every upsert so only stale/disconnected data expires. |
+| `DATA_TTL_DYNAMIC` | `1h` | Retention period for `mac_table` and `arp_table` (Go duration syntax, e.g. `30m`, `2h`). These tables change frequently; set lower to keep the DB lean. |
+| `DATA_TTL_STATIC` | `24h` | Retention period for `interface_table` and `vlan_table` (Go duration syntax, e.g. `12h`, `7d`). These change rarely; a longer TTL avoids losing data during brief outages. |
 
 **SAML / Azure AD (webapp)**
 
@@ -493,6 +494,8 @@ Copy `example.env` to `.env` and edit it. Docker Compose reads it automatically 
 |----------|---------|-------------|
 | `KAFKA_BROKER` | `localhost:19092` | Redpanda/Kafka broker address |
 | `POSTGRES_DSN` | *(built from `.env` vars)* | PostgreSQL connection string |
+| `DATA_TTL_DYNAMIC` | `1h` | Retention period for `mac_table` and `arp_table` |
+| `DATA_TTL_STATIC` | `24h` | Retention period for `interface_table` and `vlan_table` |
 
 Inside the Docker Compose network the containers use the internal Kafka address (`redpanda:9092`). The external port `19092` is for tooling running on the host.
 
