@@ -188,17 +188,15 @@ This brings up five containers: `redpanda`, `postgres`, `nginx`, `collector`, `w
 
 ### 4. Run Database Migrations
 
-Apply the three migration files in order against the running PostgreSQL instance. Source `.env` first so the credentials match what the container was started with:
+Apply the migration file against the running PostgreSQL instance. Source `.env` first so the credentials match what the container was started with:
 
 ```bash
 source .env
 psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:15432/${POSTGRES_DB}?sslmode=require" \
-  -f migrations/001_init.sql \
-  -f migrations/002_interfaces.sql \
-  -f migrations/003_vlans.sql
+  -f migrations/001_init.sql
 ```
 
-The migrations are idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running them is safe.
+The migration is idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running it is safe.
 
 ### 4.5 Restart the Webapp Container
 
@@ -362,6 +360,8 @@ WHERE m.mac_address = 'aa:bb:cc:dd:ee:ff';
 | `prefix_len` | smallint | Prefix length (e.g. `24`) |
 | `vrf` | text | VRF name if configured |
 | `mtu` | integer | MTU in bytes |
+| `access_vlan` | smallint | Switchport access (data) VLAN; defaults to `1` |
+| `voice_vlan` | smallint | Voice VLAN (`NULL` if not configured) |
 | `collected_at` | timestamptz | Timestamp from the telemetry message |
 
 ### `vlan_table`
@@ -460,6 +460,12 @@ Copy `example.env` to `.env` and edit it. Docker Compose reads it automatically 
 | `POSTGRES_PASSWORD` | PostgreSQL password |
 | `POSTGRES_DB` | PostgreSQL database name |
 
+**Consumer**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATA_TTL` | `5m` | How long to retain telemetry rows before the consumer purges them (Go duration syntax, e.g. `5m`, `1h`). Active entries are refreshed on every upsert so only stale/disconnected data expires. |
+
 **SAML / Azure AD (webapp)**
 
 | Variable | Default | Description |
@@ -469,6 +475,12 @@ Copy `example.env` to `.env` and edit it. Docker Compose reads it automatically 
 | `SAML_SP_ROOT_URL` | *(none)* | Public base URL of the app, e.g. `https://portfinder.example.com` |
 | `SAML_SP_CERT_FILE` | `./certs/saml/sp.crt` | Path to SP signing certificate (PEM) |
 | `SAML_SP_KEY_FILE` | `./certs/saml/sp.key` | Path to SP private key (PEM) |
+
+**DB Inspector (webapp)**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DBVIEW_ENABLED` | `false` | Set to `true` to expose the raw DB inspector at `/dbview` and `/api/db-inspect`. Intended for troubleshooting only — leave disabled in normal operation. |
 
 ### Collector
 | Variable | Default | Description |

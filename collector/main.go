@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -253,12 +254,18 @@ func (s *telemetryServer) publishARP(t *telpb.Telemetry) error {
 // ── Interface config parser ──────────────────────────────────────────────────
 
 // findNestedField follows a sequence of field names through the GPB-KV tree.
+// Field names are matched after stripping any YANG module prefix
+// (e.g. "Cisco-IOS-XE-switch:access" matches the path step "access").
 func findNestedField(fields []*telpb.TelemetryField, path ...string) *telpb.TelemetryField {
 	cur := fields
 	for i, name := range path {
 		var match *telpb.TelemetryField
 		for _, f := range cur {
-			if f.Name == name {
+			fname := f.Name
+			if idx := strings.LastIndex(fname, ":"); idx >= 0 {
+				fname = fname[idx+1:]
+			}
+			if fname == name {
 				match = f
 				break
 			}

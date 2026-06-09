@@ -496,6 +496,14 @@ func main() {
 		return samlMiddleware.RequireAccount(h)
 	}
 
+	dbviewEnabled := os.Getenv("DBVIEW_ENABLED") == "true"
+
+	servedIndexHTML := indexHTML
+	if !dbviewEnabled {
+		servedIndexHTML = strings.ReplaceAll(servedIndexHTML,
+			`<a class="api-link" href="/dbview">DB Inspector</a>`, "")
+	}
+
 	mux := http.NewServeMux()
 
 	if samlMiddleware != nil {
@@ -504,7 +512,7 @@ func main() {
 
 	mux.Handle("/", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, indexHTML)
+		fmt.Fprint(w, servedIndexHTML)
 	})))
 	mux.Handle("/swagger", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -515,11 +523,15 @@ func main() {
 		w.Write(openapiJSON)
 	})
 	mux.Handle("/api/search", protect(handleSearch(db)))
-	mux.Handle("/dbview", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, dbviewHTML)
-	})))
-	mux.Handle("/api/db-inspect", protect(handleDBInspect(db)))
+
+	if dbviewEnabled {
+		mux.Handle("/dbview", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, dbviewHTML)
+		})))
+		mux.Handle("/api/db-inspect", protect(handleDBInspect(db)))
+		log.Println("dbview: enabled")
+	}
 
 	addr := envOr("LISTEN_ADDR", ":8888")
 	log.Printf("webapp listening on %s", addr)

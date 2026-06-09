@@ -134,6 +134,7 @@ services:
       SAML_SP_ROOT_URL: ${SAML_SP_ROOT_URL:-}
       SAML_SP_CERT_FILE: /app/certs/saml/sp.crt
       SAML_SP_KEY_FILE: /app/certs/saml/sp.key
+      DBVIEW_ENABLED: ${DBVIEW_ENABLED:-false}
     volumes:
       - ./certs/saml:/app/certs/saml:ro
     depends_on:
