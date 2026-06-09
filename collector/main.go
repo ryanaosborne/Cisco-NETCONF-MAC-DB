@@ -70,6 +70,8 @@ type IfEntry struct {
 	PrefixLen   int       `json:"prefix_len,omitempty"`
 	VRF         string    `json:"vrf,omitempty"`
 	MTU         uint32    `json:"mtu,omitempty"`
+	AccessVlan  uint16    `json:"access_vlan"`  // data VLAN; default 1
+	VoiceVlan   uint16    `json:"voice_vlan"`   // 0 = no voice VLAN
 }
 
 // ── gRPC server ─────────────────────────────────────────────────────────────
@@ -141,7 +143,6 @@ func isInterface(path string) bool {
 func isVlan(path string) bool {
 	return path == "openconfig-vlan:vlans/vlan"
 }
-
 
 // expandIfName converts Cisco abbreviated interface names (e.g. "Gi1/0/1",
 // "Te1/1/1") to their full forms so they match what the interface parser stores.
@@ -306,6 +307,7 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 				Timestamp: ts,
 				NodeID:    t.NodeIdStr,
 			}
+
 			for _, f := range iface.Fields {
 				switch f.Name {
 				case "name":
@@ -333,7 +335,39 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 					if mask := findNestedField(f.Fields, "address", "primary", "mask"); mask != nil {
 						entry.PrefixLen = maskToPrefixLen(mask.GetStringValue())
 					}
+				case "switchport-config":
+					// Cisco-IOS-XE-switch augments switchport-config/switchport with
+					// access/vlan/vlan and voice/vlan/vlan integers.
+					if v := findNestedField(f.Fields, "switchport", "voice", "vlan", "vlan"); v != nil {
+						if n := v.GetUint32Value(); n != 0 {
+							entry.VoiceVlan = uint16(n)
+						}
+					}
+					if a := findNestedField(f.Fields, "switchport", "access", "vlan", "vlan"); a != nil {
+						if n := a.GetUint32Value(); n != 0 {
+							entry.AccessVlan = uint16(n)
+						}
+					}
+				case "switchport":
+					// Also check the bare switchport container (duplicate in some IOS-XE versions).
+					if entry.VoiceVlan == 0 {
+						if v := findNestedField(f.Fields, "voice", "vlan", "vlan"); v != nil {
+							if n := v.GetUint32Value(); n != 0 {
+								entry.VoiceVlan = uint16(n)
+							}
+						}
+					}
+					if entry.AccessVlan == 0 {
+						if a := findNestedField(f.Fields, "access", "vlan", "vlan"); a != nil {
+							if n := a.GetUint32Value(); n != 0 {
+								entry.AccessVlan = uint16(n)
+							}
+						}
+					}
 				}
+			}
+			if entry.AccessVlan == 0 {
+				entry.AccessVlan = 1 // default data VLAN when not explicitly configured
 			}
 			if entry.Name == "" {
 				continue

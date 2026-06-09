@@ -68,6 +68,8 @@ type interfaceRow struct {
 	PrefixLen   *int16    `json:"prefix_len"`
 	VRF         *string   `json:"vrf"`
 	MTU         *int32    `json:"mtu"`
+	AccessVlan  *int16    `json:"access_vlan"`
+	VoiceVlan   *int16    `json:"voice_vlan"`
 	CollectedAt time.Time `json:"collected_at"`
 }
 
@@ -164,7 +166,7 @@ func handleDBInspect(db *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
 		}
-		ifaceRows, err := db.Query(ctx, `SELECT id,node_id,name,description,shutdown,ip_address,prefix_len,vrf,mtu,collected_at FROM interface_table ORDER BY id DESC LIMIT $1`, dbInspectLimit)
+		ifaceRows, err := db.Query(ctx, `SELECT id,node_id,name,description,shutdown,ip_address,prefix_len,vrf,mtu,access_vlan,voice_vlan,collected_at FROM interface_table ORDER BY id DESC LIMIT $1`, dbInspectLimit)
 		if err != nil {
 			log.Printf("dbinspect: query interface: %v", err)
 			http.Error(w, "database error", http.StatusInternalServerError)
@@ -173,7 +175,7 @@ func handleDBInspect(db *pgxpool.Pool) http.HandlerFunc {
 		resp.InterfaceRows = []interfaceRow{}
 		for ifaceRows.Next() {
 			var row interfaceRow
-			if err := ifaceRows.Scan(&row.ID, &row.NodeID, &row.Name, &row.Description, &row.Shutdown, &row.IPAddress, &row.PrefixLen, &row.VRF, &row.MTU, &row.CollectedAt); err != nil {
+			if err := ifaceRows.Scan(&row.ID, &row.NodeID, &row.Name, &row.Description, &row.Shutdown, &row.IPAddress, &row.PrefixLen, &row.VRF, &row.MTU, &row.AccessVlan, &row.VoiceVlan, &row.CollectedAt); err != nil {
 				log.Printf("dbinspect: scan interface: %v", err)
 				continue
 			}
@@ -227,6 +229,10 @@ type Result struct {
 	InterfaceDescription *string `json:"interface_description"`
 	Vlan                 *int32  `json:"vlan"`
 	VlanName             *string `json:"vlan_name"`
+	AccessVlan           *int32  `json:"access_vlan"`
+	AccessVlanName       *string `json:"access_vlan_name"`
+	VoiceVlan            *int32  `json:"voice_vlan"`
+	VoiceVlanName        *string `json:"voice_vlan_name"`
 }
 
 // normalizeMac returns both colon and Cisco-dot forms of a MAC so the query
@@ -258,6 +264,23 @@ WITH latest_arp AS (
         node_id, ip_address, mac_address, interface, age_seconds, collected_at
     FROM arp_table
     ORDER BY mac_address, collected_at DESC
+),
+best_mac AS (
+    -- When the same MAC is learned by multiple switches (e.g. via a trunk/port-channel
+    -- upstream), prefer the physical access port entry over logical interfaces.
+    -- Ties on rank fall back to most-recent collected_at.
+    SELECT DISTINCT ON (mac_address)
+        node_id, mac_address, interface, vlan, collected_at
+    FROM mac_table
+    ORDER BY mac_address,
+        CASE
+            WHEN interface ILIKE 'Vlan%'         THEN 3
+            WHEN interface ILIKE 'Loopback%'      THEN 3
+            WHEN interface ILIKE 'Tunnel%'        THEN 3
+            WHEN interface ILIKE 'Port-channel%'  THEN 2
+            ELSE 1
+        END ASC,
+        collected_at DESC
 )
 SELECT
     m.node_id,
@@ -266,11 +289,17 @@ SELECT
     m.interface,
     i.description  AS interface_description,
     m.vlan,
-    v.name         AS vlan_name
-FROM mac_table m
-LEFT JOIN latest_arp      a ON  m.mac_address = a.mac_address
-LEFT JOIN interface_table i ON  m.node_id     = i.node_id AND m.interface = i.name
-LEFT JOIN vlan_table      v ON  m.node_id     = v.node_id AND m.vlan      = v.vlan_id
+    v.name         AS vlan_name,
+    i.access_vlan,
+    dv.name        AS access_vlan_name,
+    i.voice_vlan,
+    vv.name        AS voice_vlan_name
+FROM best_mac m
+LEFT JOIN latest_arp      a  ON  m.mac_address  = a.mac_address
+LEFT JOIN interface_table i  ON  m.node_id      = i.node_id AND m.interface   = i.name
+LEFT JOIN vlan_table      v  ON  m.node_id      = v.node_id AND m.vlan        = v.vlan_id
+LEFT JOIN vlan_table      dv ON  m.node_id      = dv.node_id AND i.access_vlan = dv.vlan_id
+LEFT JOIN vlan_table      vv ON  m.node_id      = vv.node_id AND i.voice_vlan  = vv.vlan_id
 WHERE lower(m.mac_address) = ANY($1) OR a.ip_address = ANY($2)
 
 UNION
@@ -282,6 +311,10 @@ SELECT
     NULL::text,
     NULL::text,
     NULL::integer,
+    NULL::text,
+    NULL::smallint,
+    NULL::text,
+    NULL::smallint,
     NULL::text
 FROM (
     SELECT DISTINCT ON (ip_address)
@@ -365,6 +398,8 @@ func handleSearch(db *pgxpool.Pool) http.HandlerFunc {
 				&res.NodeID, &res.MacAddress, &res.IPAddress,
 				&res.Interface, &res.InterfaceDescription,
 				&res.Vlan, &res.VlanName,
+				&res.AccessVlan, &res.AccessVlanName,
+				&res.VoiceVlan, &res.VoiceVlanName,
 			); err != nil {
 				log.Printf("scan: %v", err)
 				continue

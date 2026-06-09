@@ -51,6 +51,8 @@ type IfEntry struct {
     PrefixLen   int       `json:"prefix_len"`
     VRF         string    `json:"vrf"`
     MTU         uint32    `json:"mtu"`
+    AccessVlan  uint16    `json:"access_vlan"`
+    VoiceVlan   uint16    `json:"voice_vlan"`
 }
 
 // ── Kafka consumer handler ───────────────────────────────────────────────────
@@ -123,8 +125,8 @@ func (h *handler) handleInterface(b []byte) error {
         return err
     }
     _, err := h.db.Exec(context.Background(), `
-        INSERT INTO interface_table (node_id, name, description, shutdown, ip_address, prefix_len, vrf, mtu, collected_at)
-        VALUES ($1, $2, $3, $4, NULLIF($5,''), NULLIF($6,0), NULLIF($7,''), NULLIF($8,0), $9)
+        INSERT INTO interface_table (node_id, name, description, shutdown, ip_address, prefix_len, vrf, mtu, access_vlan, voice_vlan, collected_at)
+        VALUES ($1, $2, $3, $4, NULLIF($5,''), NULLIF($6,0), NULLIF($7,''), NULLIF($8,0), $9, NULLIF($10,0), $11)
         ON CONFLICT (node_id, name) DO UPDATE SET
             description  = EXCLUDED.description,
             shutdown     = EXCLUDED.shutdown,
@@ -132,9 +134,12 @@ func (h *handler) handleInterface(b []byte) error {
             prefix_len   = EXCLUDED.prefix_len,
             vrf          = EXCLUDED.vrf,
             mtu          = EXCLUDED.mtu,
+            access_vlan  = EXCLUDED.access_vlan,
+            voice_vlan   = EXCLUDED.voice_vlan,
             collected_at = EXCLUDED.collected_at`,
         e.NodeID, e.Name, e.Description, e.Shutdown,
-        e.IPAddress, e.PrefixLen, e.VRF, e.MTU, e.Timestamp)
+        e.IPAddress, e.PrefixLen, e.VRF, e.MTU,
+        e.AccessVlan, e.VoiceVlan, e.Timestamp)
     return err
 }
 
@@ -152,6 +157,31 @@ func (h *handler) handleVlan(b []byte) error {
             collected_at = EXCLUDED.collected_at`,
         e.NodeID, e.VlanID, e.Name, e.Status, e.Timestamp)
     return err
+}
+
+// startCleanup deletes rows older than ttl from all telemetry tables, running
+// every minute until ctx is cancelled.
+func startCleanup(ctx context.Context, db *pgxpool.Pool, ttl time.Duration) {
+    tables := []string{"mac_table", "arp_table", "interface_table", "vlan_table"}
+    ticker := time.NewTicker(time.Minute)
+    defer ticker.Stop()
+    log.Printf("cleanup: started (ttl=%s, interval=1m)", ttl)
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            cutoff := time.Now().Add(-ttl)
+            for _, tbl := range tables {
+                tag, err := db.Exec(ctx, "DELETE FROM "+tbl+" WHERE collected_at < $1", cutoff)
+                if err != nil {
+                    log.Printf("cleanup %s: %v", tbl, err)
+                } else if tag.RowsAffected() > 0 {
+                    log.Printf("cleanup %s: removed %d stale rows", tbl, tag.RowsAffected())
+                }
+            }
+        }
+    }
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -180,6 +210,12 @@ func main() {
 
     ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
     defer stop()
+
+    ttl, err := time.ParseDuration(envOr("DATA_TTL", "5m"))
+    if err != nil {
+        log.Fatalf("invalid DATA_TTL: %v", err)
+    }
+    go startCleanup(ctx, db, ttl)
 
     topics := []string{"mac-table", "arp-table", "interface-table", "vlan-table"}
     h := &handler{db: db}

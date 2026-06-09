@@ -252,8 +252,10 @@
             <th>IP Address</th>
             <th>Interface</th>
             <th>Description</th>
-            <th>VLAN</th>
-            <th>VLAN Name</th>
+            <th>Data VLAN</th>
+            <th>Data VLAN Name</th>
+            <th>Voice VLAN</th>
+            <th>Voice VLAN Name</th>
           </tr>
         </thead>
         <tbody id="result-body"></tbody>
@@ -305,8 +307,10 @@ function renderResults(data) {
       <td>${codeCell(r.ip_address)}</td>
       <td>${cell(r.interface)}</td>
       <td class="desc" title="${esc(r.interface_description ?? '')}">${cell(r.interface_description)}</td>
-      <td>${r.vlan != null ? r.vlan : '<span class="null-val">—</span>'}</td>
-      <td>${cell(r.vlan_name)}</td>
+      <td>${r.access_vlan != null ? r.access_vlan : '<span class="null-val">—</span>'}</td>
+      <td>${cell(r.access_vlan_name)}</td>
+      <td>${r.voice_vlan != null ? r.voice_vlan : '<span class="null-val">—</span>'}</td>
+      <td>${cell(r.voice_vlan_name)}</td>
     </tr>`).join('');
 
   show(resultsCard);
