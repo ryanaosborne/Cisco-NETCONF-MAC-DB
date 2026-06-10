@@ -65,14 +65,14 @@ type IfEntry struct {
 	Timestamp   time.Time `json:"timestamp"`
 	NodeID      string    `json:"node_id"`
 	Name        string    `json:"name"`
-	Description string    `json:"description"`
+	Description *string    `json:"description"`
 	Shutdown    bool      `json:"shutdown"`
 	IPAddress   string    `json:"ip_address,omitempty"`
 	PrefixLen   int       `json:"prefix_len,omitempty"`
 	VRF         string    `json:"vrf,omitempty"`
 	MTU         uint32    `json:"mtu,omitempty"`
-	AccessVlan  uint16    `json:"access_vlan"`  // data VLAN; default 1
-	VoiceVlan   uint16    `json:"voice_vlan"`   // 0 = no voice VLAN
+	AccessVlan  *uint16   `json:"access_vlan"` // null when not present in message
+	VoiceVlan   *uint16   `json:"voice_vlan"`  // null when not present in message
 }
 
 // ── gRPC server ─────────────────────────────────────────────────────────────
@@ -125,6 +125,48 @@ func (s *telemetryServer) dispatch(t *telpb.Telemetry) error {
 		log.Printf("unhandled path: %s", t.EncodingPath)
 		return nil
 	}
+}
+
+// Get INT_DEBUG from environment to enable dumping raw telemetry fields for debugging purposes
+var intDebug = envOr("INT_DEBUG", "") != ""
+
+// showing each field's name, value type, and value (or child fields if it's a
+// container). Used to understand the raw structure coming from the switch.
+func dumpFields(fields []*telpb.TelemetryField, depth int) string {
+	var sb strings.Builder
+	pad := strings.Repeat("  ", depth)
+	for _, f := range fields {
+		var typ, val string
+		switch v := f.ValueByType.(type) {
+		case *telpb.TelemetryField_StringValue:
+			typ, val = "string", fmt.Sprintf("%q", v.StringValue)
+		case *telpb.TelemetryField_Uint32Value:
+			typ, val = "uint32", fmt.Sprintf("%d", v.Uint32Value)
+		case *telpb.TelemetryField_Uint64Value:
+			typ, val = "uint64", fmt.Sprintf("%d", v.Uint64Value)
+		case *telpb.TelemetryField_Sint32Value:
+			typ, val = "sint32", fmt.Sprintf("%d", v.Sint32Value)
+		case *telpb.TelemetryField_Sint64Value:
+			typ, val = "sint64", fmt.Sprintf("%d", v.Sint64Value)
+		case *telpb.TelemetryField_DoubleValue:
+			typ, val = "double", fmt.Sprintf("%g", v.DoubleValue)
+		case *telpb.TelemetryField_FloatValue:
+			typ, val = "float", fmt.Sprintf("%g", v.FloatValue)
+		case *telpb.TelemetryField_BoolValue:
+			typ, val = "bool", fmt.Sprintf("%t", v.BoolValue)
+		case *telpb.TelemetryField_BytesValue:
+			typ, val = "bytes", fmt.Sprintf("%x", v.BytesValue)
+		default:
+			typ = "container"
+		}
+		if len(f.Fields) > 0 {
+			sb.WriteString(fmt.Sprintf("%s[%s] (%s)\n", pad, f.Name, typ))
+			sb.WriteString(dumpFields(f.Fields, depth+1))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s[%s] (%s) = %s\n", pad, f.Name, typ, val))
+		}
+	}
+	return sb.String()
 }
 
 func isMAC(path string) bool {
@@ -292,6 +334,13 @@ func maskToPrefixLen(mask string) int {
 }
 
 func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
+	if intDebug {
+		log.Printf("INT DEBUG node=%s path=%s collection_id=%d rows=%d",
+			t.NodeIdStr, t.EncodingPath, t.CollectionId, len(t.DataGpbkv))
+		for i, row := range t.DataGpbkv {
+			log.Printf("  row[%d] timestamp=%d\n%s", i, row.Timestamp, dumpFields(row.Fields, 2))
+		}
+	}
 	ts := time.UnixMilli(int64(t.MsgTimestamp))
 	for _, row := range t.DataGpbkv {
 		// The native interface container sends all interface entries inside a
@@ -326,7 +375,10 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 						entry.Name = fmt.Sprintf("%s%d", ifType, f.GetUint32Value())
 					}
 				case "description":
-					entry.Description = f.GetStringValue()
+					if s := f.GetStringValue(); s != "" {
+						entry.Description = &s
+					}
+					
 				case "mtu":
 					entry.MTU = f.GetUint32Value()
 				case "shutdown":
@@ -347,34 +399,35 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 					// access/vlan/vlan and voice/vlan/vlan integers.
 					if v := findNestedField(f.Fields, "switchport", "voice", "vlan", "vlan"); v != nil {
 						if n := v.GetUint32Value(); n != 0 {
-							entry.VoiceVlan = uint16(n)
+							vv := uint16(n)
+							entry.VoiceVlan = &vv
 						}
 					}
 					if a := findNestedField(f.Fields, "switchport", "access", "vlan", "vlan"); a != nil {
 						if n := a.GetUint32Value(); n != 0 {
-							entry.AccessVlan = uint16(n)
+							av := uint16(n)
+							entry.AccessVlan = &av
 						}
 					}
 				case "switchport":
 					// Also check the bare switchport container (duplicate in some IOS-XE versions).
-					if entry.VoiceVlan == 0 {
+					if entry.VoiceVlan == nil {
 						if v := findNestedField(f.Fields, "voice", "vlan", "vlan"); v != nil {
 							if n := v.GetUint32Value(); n != 0 {
-								entry.VoiceVlan = uint16(n)
+								vv := uint16(n)
+								entry.VoiceVlan = &vv
 							}
 						}
 					}
-					if entry.AccessVlan == 0 {
+					if entry.AccessVlan == nil {
 						if a := findNestedField(f.Fields, "access", "vlan", "vlan"); a != nil {
 							if n := a.GetUint32Value(); n != 0 {
-								entry.AccessVlan = uint16(n)
+								av := uint16(n)
+								entry.AccessVlan = &av
 							}
 						}
 					}
 				}
-			}
-			if entry.AccessVlan == 0 {
-				entry.AccessVlan = 1 // default data VLAN when not explicitly configured
 			}
 			if entry.Name == "" {
 				continue

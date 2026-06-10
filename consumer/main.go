@@ -45,14 +45,14 @@ type IfEntry struct {
     Timestamp   time.Time `json:"timestamp"`
     NodeID      string    `json:"node_id"`
     Name        string    `json:"name"`
-    Description string    `json:"description"`
-    Shutdown    bool      `json:"shutdown"`
-    IPAddress   string    `json:"ip_address"`
-    PrefixLen   int       `json:"prefix_len"`
-    VRF         string    `json:"vrf"`
-    MTU         uint32    `json:"mtu"`
-    AccessVlan  uint16    `json:"access_vlan"`
-    VoiceVlan   uint16    `json:"voice_vlan"`
+    Description *string   `json:"description"`
+    Shutdown    *bool     `json:"shutdown"`
+    IPAddress   *string   `json:"ip_address"`
+    PrefixLen   *int      `json:"prefix_len"`
+    VRF         *string   `json:"vrf"`
+    MTU         *uint32   `json:"mtu"`
+    AccessVlan  *uint16   `json:"access_vlan"`
+    VoiceVlan   *uint16   `json:"voice_vlan"`
 }
 
 // ── Kafka consumer handler ───────────────────────────────────────────────────
@@ -126,16 +126,16 @@ func (h *handler) handleInterface(b []byte) error {
     }
     _, err := h.db.Exec(context.Background(), `
         INSERT INTO interface_table (node_id, name, description, shutdown, ip_address, prefix_len, vrf, mtu, access_vlan, voice_vlan, collected_at)
-        VALUES ($1, $2, $3, $4, NULLIF($5,''), NULLIF($6,0), NULLIF($7,''), NULLIF($8,0), $9, NULLIF($10,0), $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::smallint, 1), $10::smallint, $11)
         ON CONFLICT (node_id, name) DO UPDATE SET
-            description  = EXCLUDED.description,
-            shutdown     = EXCLUDED.shutdown,
-            ip_address   = EXCLUDED.ip_address,
-            prefix_len   = EXCLUDED.prefix_len,
-            vrf          = EXCLUDED.vrf,
-            mtu          = EXCLUDED.mtu,
-            access_vlan  = EXCLUDED.access_vlan,
-            voice_vlan   = EXCLUDED.voice_vlan,
+            description  = COALESCE(EXCLUDED.description,         interface_table.description),
+            shutdown     = COALESCE(EXCLUDED.shutdown,            interface_table.shutdown),
+            ip_address   = COALESCE(EXCLUDED.ip_address,          interface_table.ip_address),
+            prefix_len   = COALESCE(EXCLUDED.prefix_len,          interface_table.prefix_len),
+            vrf          = COALESCE(EXCLUDED.vrf,                 interface_table.vrf),
+            mtu          = COALESCE(EXCLUDED.mtu,                 interface_table.mtu),
+            access_vlan  = COALESCE($9::smallint,                 interface_table.access_vlan),
+            voice_vlan   = COALESCE($10::smallint,                interface_table.voice_vlan),
             collected_at = EXCLUDED.collected_at`,
         e.NodeID, e.Name, e.Description, e.Shutdown,
         e.IPAddress, e.PrefixLen, e.VRF, e.MTU,
@@ -159,20 +159,20 @@ func (h *handler) handleVlan(b []byte) error {
     return err
 }
 
-// startCleanup deletes rows older than ttl from all telemetry tables, running
-// every minute until ctx is cancelled.
-func startCleanup(ctx context.Context, db *pgxpool.Pool, ttl time.Duration) {
-    tables := []string{"mac_table", "arp_table", "interface_table", "vlan_table"}
+// startCleanup deletes rows older than their configured TTL from all telemetry
+// tables, running every minute until ctx is cancelled.
+func startCleanup(ctx context.Context, db *pgxpool.Pool, ttls map[string]time.Duration) {
     ticker := time.NewTicker(time.Minute)
     defer ticker.Stop()
-    log.Printf("cleanup: started (ttl=%s, interval=1m)", ttl)
+    log.Printf("cleanup: started (mac/arp ttl=%s, if/vlan ttl=%s, interval=1m)",
+        ttls["mac_table"], ttls["interface_table"])
     for {
         select {
         case <-ctx.Done():
             return
         case <-ticker.C:
-            cutoff := time.Now().Add(-ttl)
-            for _, tbl := range tables {
+            for tbl, ttl := range ttls {
+                cutoff := time.Now().Add(-ttl)
                 tag, err := db.Exec(ctx, "DELETE FROM "+tbl+" WHERE collected_at < $1", cutoff)
                 if err != nil {
                     log.Printf("cleanup %s: %v", tbl, err)
@@ -211,11 +211,20 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
     defer stop()
 
-    ttl, err := time.ParseDuration(envOr("DATA_TTL", "5m"))
+    dynamicTTL, err := time.ParseDuration(envOr("DATA_TTL_DYNAMIC", "5m"))
     if err != nil {
-        log.Fatalf("invalid DATA_TTL: %v", err)
+        log.Fatalf("invalid DATA_TTL_DYNAMIC: %v", err)
     }
-    go startCleanup(ctx, db, ttl)
+    staticTTL, err := time.ParseDuration(envOr("DATA_TTL_STATIC", "25h"))
+    if err != nil {
+        log.Fatalf("invalid DATA_TTL_STATIC: %v", err)
+    }
+    go startCleanup(ctx, db, map[string]time.Duration{
+        "mac_table":       dynamicTTL,
+        "arp_table":       dynamicTTL,
+        "interface_table": staticTTL,
+        "vlan_table":      staticTTL,
+    })
 
     topics := []string{"mac-table", "arp-table", "interface-table", "vlan-table"}
     h := &handler{db: db}
