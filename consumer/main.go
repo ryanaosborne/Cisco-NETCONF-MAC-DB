@@ -92,7 +92,7 @@ func (h *handler) handleMAC(b []byte) error {
     _, err := h.db.Exec(context.Background(), `
         INSERT INTO mac_table (node_id, mac_address, interface, vlan, mac_type, collected_at)
         VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (mac_address) DO UPDATE SET
+        ON CONFLICT (node_id, mac_address) DO UPDATE SET
             node_id      = EXCLUDED.node_id,
             interface    = EXCLUDED.interface,
             vlan         = EXCLUDED.vlan,

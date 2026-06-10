@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,8 +34,9 @@ var dbviewHTML string
 var openapiJSON []byte
 
 var (
-	macRe = regexp.MustCompile(`(?i)^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$|^[0-9a-f]{12}$`)
-	ipRe  = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}$`)
+	macRe  = regexp.MustCompile(`(?i)^([0-9a-f]{2}[:\-]){5}[0-9a-f]{2}$|^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$|^[0-9a-f]{12}$`)
+	ipRe   = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}$`)
+	hostRe = regexp.MustCompile(`(?i)^[a-z][a-z0-9\-.]*$`)
 )
 
 // Row types used by the DB inspector endpoint.
@@ -346,7 +348,7 @@ func handleSearch(db *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		seen := map[string]bool{}
-		var macs, ips []string
+		var macs, ips, hostnames []string
 
 		for _, t := range req.Terms {
 			t = strings.TrimSpace(t)
@@ -364,6 +366,27 @@ func handleSearch(db *pgxpool.Pool) http.HandlerFunc {
 				if !seen[t] {
 					seen[t] = true
 					ips = append(ips, t)
+				}
+			} else if hostRe.MatchString(t) {
+				if !seen[t] {
+					seen[t] = true
+					hostnames = append(hostnames, t)
+				}
+			}
+		}
+
+		for _, hostname := range hostnames {
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			addrs, err := net.DefaultResolver.LookupHost(ctx, hostname)
+			cancel()
+			if err != nil {
+				log.Printf("search: lookup %q: %v", hostname, err)
+				continue
+			}
+			for _, addr := range addrs {
+				if ipRe.MatchString(addr) && !seen[addr] {
+					seen[addr] = true
+					ips = append(ips, addr)
 				}
 			}
 		}
@@ -414,6 +437,32 @@ func handleSearch(db *pgxpool.Pool) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(results)
+	}
+}
+
+func handleRDNS() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ip := r.URL.Query().Get("ip")
+		if ip == "" || !ipRe.MatchString(ip) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		names, err := net.DefaultResolver.LookupAddr(ctx, ip)
+
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil || len(names) == 0 {
+			json.NewEncoder(w).Encode(map[string]any{"hostname": nil})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"hostname": strings.TrimSuffix(names[0], ".")})
 	}
 }
 
@@ -523,6 +572,7 @@ func main() {
 		w.Write(openapiJSON)
 	})
 	mux.Handle("/api/search", protect(handleSearch(db)))
+	mux.Handle("/api/rdns", protect(handleRDNS()))
 
 	if dbviewEnabled {
 		mux.Handle("/dbview", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

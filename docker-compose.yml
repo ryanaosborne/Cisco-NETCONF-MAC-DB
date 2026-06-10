@@ -52,6 +52,7 @@ services:
       - ./certs/postgres:/ssl:ro
       - ./postgres/ssl-entrypoint.sh:/postgres-ssl-entrypoint.sh:ro
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT 1 FROM mac_table LIMIT 1' && echo 'healthy' || echo 'not ready'"]
       interval: 5s

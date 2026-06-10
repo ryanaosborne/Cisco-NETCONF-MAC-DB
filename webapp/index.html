@@ -38,7 +38,7 @@
   }
   .api-link:hover { background: rgba(255,255,255,0.25); }
 
-  main { max-width: 1400px; margin: 0 auto; padding: 1.5rem 1rem; }
+  main { padding: 1.5rem 1rem; }
 
   .card {
     background: white;
@@ -171,21 +171,54 @@
   thead th {
     background: #1e3a8a;
     color: white;
-    padding: 0.625rem 1rem;
+    padding: 0.625rem 0.625rem 0.625rem 1rem;
     text-align: left;
     font-weight: 500;
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    position: relative;
+    user-select: none;
+    cursor: pointer;
+    overflow: hidden;
   }
+  thead th:hover { background: #1e40af; }
+  thead th.sort-active { background: #1d4ed8; }
+
+  .th-label { pointer-events: none; }
+
+  .sort-arrow {
+    display: inline-block;
+    margin-left: 0.3rem;
+    opacity: 0.3;
+    font-size: 0.7rem;
+    vertical-align: middle;
+    pointer-events: none;
+  }
+  thead th.sort-asc .sort-arrow,
+  thead th.sort-desc .sort-arrow { opacity: 1; }
+
+  .resize-handle {
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: 5px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 2;
+  }
+  .resize-handle:hover { background: rgba(255,255,255,0.4); }
+  .resize-handle.active { background: rgba(255,255,255,0.6); }
+
+  body.col-resizing,
+  body.col-resizing * { cursor: col-resize !important; user-select: none !important; }
 
   tbody tr { border-bottom: 1px solid #f1f5f9; }
   tbody tr:last-child { border-bottom: none; }
   tbody tr:hover td { background: #f8fafc; }
-  td { padding: 0.625rem 1rem; vertical-align: middle; }
+  td { padding: 0.625rem 1rem; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
 
   td.desc {
-    max-width: 240px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -201,6 +234,9 @@
   }
 
   .null-val { color: #cbd5e1; }
+
+  @keyframes rdns-pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .rdns-loading { color: #94a3b8; animation: rdns-pulse 1.2s ease-in-out infinite; }
 </style>
 </head>
 <body>
@@ -219,11 +255,11 @@
 <main>
   <div class="card">
     <label for="terms">Search terms</label>
-    <textarea id="terms" placeholder="aa:bb:cc:dd:ee:ff&#10;10.0.0.203&#10;aabb.ccdd.eeff"></textarea>
+    <textarea id="terms" placeholder="aa:bb:cc:dd:ee:ff&#10;10.0.0.203&#10;aabb.ccdd.eeff&#10;PRG-WAH-CSR0154&#10;PRG-WAH-CSR0154.afni.net"></textarea>
     <div class="actions">
       <button class="btn-primary" id="search-btn">Search</button>
       <button class="btn-secondary" id="clear-btn">Clear</button>
-      <span class="hint">Ctrl+Enter to search &nbsp;·&nbsp; Accepts colon, hyphen, Cisco dot, or bare hex MAC formats &nbsp;·&nbsp; Case insensitive</span>
+      <span class="hint">Ctrl+Enter to search &nbsp;·&nbsp; Accepts MAC (colon/hyphen/Cisco dot/bare hex), IP address, or hostname &nbsp;·&nbsp; Case insensitive</span>
     </div>
   </div>
 
@@ -245,17 +281,22 @@
     </div>
     <div class="table-wrap">
       <table id="result-table">
+        <colgroup>
+          <col><col><col><col style="width:240px"><col>
+          <col><col><col><col><col>
+        </colgroup>
         <thead>
           <tr>
-            <th>Node ID</th>
-            <th>MAC Address</th>
-            <th>IP Address</th>
-            <th>Interface</th>
-            <th>Description</th>
-            <th>Data VLAN</th>
-            <th>Data VLAN Name</th>
-            <th>Voice VLAN</th>
-            <th>Voice VLAN Name</th>
+            <th data-col="0"><span class="th-label">Node ID</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="1"><span class="th-label">MAC Address</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="2"><span class="th-label">IP Address</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="3"><span class="th-label">Hostname</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="4"><span class="th-label">Interface</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="5"><span class="th-label">Description</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="6"><span class="th-label">Data VLAN</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="7"><span class="th-label">Data VLAN Name</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="8"><span class="th-label">Voice VLAN</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
+            <th data-col="9"><span class="th-label">Voice VLAN Name</span><span class="sort-arrow">↕</span><div class="resize-handle"></div></th>
           </tr>
         </thead>
         <tbody id="result-body"></tbody>
@@ -274,6 +315,7 @@ const emptyState  = document.getElementById('empty-state');
 const resultsCard = document.getElementById('results-card');
 const resultCount = document.getElementById('result-count');
 const resultBody  = document.getElementById('result-body');
+const resultTable = document.getElementById('result-table');
 
 const show = el => { el.hidden = false; };
 const hide = el => { el.hidden = true; };
@@ -290,6 +332,98 @@ function codeCell(v) {
   return (v != null && v !== '') ? `<code>${esc(String(v))}</code>` : '<span class="null-val">—</span>';
 }
 
+// Sort key for each column index (Hostname col sorts by ip_address since rdns is async)
+const COL_KEYS = [
+  'node_id',
+  'mac_address',
+  'ip_address',
+  'ip_address',
+  'interface',
+  'interface_description',
+  'access_vlan',
+  'access_vlan_name',
+  'voice_vlan',
+  'voice_vlan_name',
+];
+
+let currentData = [];
+let sortColIdx  = -1;
+let sortDir     = 'asc';
+
+function compareIPs(a, b) {
+  const toNum = ip => ip.split('.').reduce((n, oct) => n * 256 + (parseInt(oct, 10) || 0), 0);
+  return toNum(a) - toNum(b);
+}
+
+function sortedData() {
+  if (sortColIdx < 0) return currentData;
+  const key = COL_KEYS[sortColIdx];
+  return [...currentData].sort((a, b) => {
+    const av = a[key];
+    const bv = b[key];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;   // nulls always last
+    if (bv == null) return -1;
+    let cmp;
+    if (key === 'ip_address') {
+      cmp = compareIPs(String(av), String(bv));
+    } else if (typeof av === 'number' && typeof bv === 'number') {
+      cmp = av - bv;
+    } else {
+      cmp = String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' });
+    }
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
+}
+
+function buildRows(data) {
+  return data.map(r => `
+    <tr>
+      <td>${cell(r.node_id)}</td>
+      <td>${codeCell(r.mac_address)}</td>
+      <td>${codeCell(r.ip_address)}</td>
+      <td data-rdns="${esc(r.ip_address ?? '')}">${r.ip_address != null ? '<span class="rdns-loading">…</span>' : '<span class="null-val">—</span>'}</td>
+      <td>${cell(r.interface)}</td>
+      <td class="desc" title="${esc(r.interface_description ?? '')}">${cell(r.interface_description)}</td>
+      <td>${r.access_vlan != null ? r.access_vlan : '<span class="null-val">—</span>'}</td>
+      <td>${cell(r.access_vlan_name)}</td>
+      <td>${r.voice_vlan != null ? r.voice_vlan : '<span class="null-val">—</span>'}</td>
+      <td>${cell(r.voice_vlan_name)}</td>
+    </tr>`).join('');
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('thead th').forEach((th, i) => {
+    th.classList.remove('sort-asc', 'sort-desc', 'sort-active');
+    const arrow = th.querySelector('.sort-arrow');
+    if (i === sortColIdx) {
+      th.classList.add('sort-active', sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+      arrow.textContent = sortDir === 'asc' ? '↑' : '↓';
+    } else {
+      arrow.textContent = '↕';
+    }
+  });
+}
+
+function applySortAndRender() {
+  resultBody.innerHTML = buildRows(sortedData());
+  updateSortHeaders();
+  resolveHostnames();
+}
+
+// Measure auto-layout column widths then lock them in for resize support.
+// Must be called while the table is visible in the DOM.
+function fitColumns() {
+  const cols = resultTable.querySelectorAll('colgroup col');
+  const ths  = resultTable.querySelectorAll('thead th');
+  resultTable.style.tableLayout = 'auto';
+  ths.forEach((th, i) => {
+    if (i === 3) return; // Hostname column is fixed at 240px
+    cols[i].style.width = th.getBoundingClientRect().width + 'px';
+  });
+  resultTable.style.tableLayout = 'fixed';
+}
+
 function renderResults(data) {
   hide(emptyState);
   hide(resultsCard);
@@ -299,23 +433,87 @@ function renderResults(data) {
     return;
   }
 
+  currentData = data;
+  sortColIdx  = -1;
+  sortDir     = 'asc';
   resultCount.textContent = data.length;
-  resultBody.innerHTML = data.map(r => `
-    <tr>
-      <td>${cell(r.node_id)}</td>
-      <td>${codeCell(r.mac_address)}</td>
-      <td>${codeCell(r.ip_address)}</td>
-      <td>${cell(r.interface)}</td>
-      <td class="desc" title="${esc(r.interface_description ?? '')}">${cell(r.interface_description)}</td>
-      <td>${r.access_vlan != null ? r.access_vlan : '<span class="null-val">—</span>'}</td>
-      <td>${cell(r.access_vlan_name)}</td>
-      <td>${r.voice_vlan != null ? r.voice_vlan : '<span class="null-val">—</span>'}</td>
-      <td>${cell(r.voice_vlan_name)}</td>
-    </tr>`).join('');
-
+  resultBody.innerHTML = buildRows(data);
+  updateSortHeaders();
+  // Card must be visible before getBoundingClientRect() returns real widths
   show(resultsCard);
+  fitColumns();
+  resolveHostnames();
 }
 
+function resolveHostnames() {
+  const byIP = new Map();
+  for (const td of document.querySelectorAll('td[data-rdns]')) {
+    const ip = td.dataset.rdns;
+    if (!ip) continue;
+    if (!byIP.has(ip)) byIP.set(ip, []);
+    byIP.get(ip).push(td);
+  }
+  for (const [ip, tds] of byIP) {
+    fetch(`/api/rdns?ip=${encodeURIComponent(ip)}`)
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => {
+        const html = data.hostname
+          ? `<code>${esc(data.hostname)}</code>`
+          : '<span class="null-val">—</span>';
+        tds.forEach(td => { td.innerHTML = html; });
+      })
+      .catch(() => {
+        tds.forEach(td => { td.innerHTML = '<span class="null-val">—</span>'; });
+      });
+  }
+}
+
+// --- Sorting: click header to sort asc, click again to flip to desc ---
+document.querySelectorAll('thead th').forEach((th, i) => {
+  th.addEventListener('click', e => {
+    if (e.target.classList.contains('resize-handle')) return;
+    if (currentData.length === 0) return;
+    sortDir = (sortColIdx === i && sortDir === 'asc') ? 'desc' : 'asc';
+    sortColIdx = i;
+    applySortAndRender();
+  });
+});
+
+// --- Column resizing: drag the right edge of any header ---
+(function initResizeHandles() {
+  const cols = resultTable.querySelectorAll('colgroup col');
+  const ths  = resultTable.querySelectorAll('thead th');
+
+  resultTable.querySelectorAll('thead th .resize-handle').forEach((handle, i) => {
+    handle.addEventListener('mousedown', e => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      handle.classList.add('active');
+      document.body.classList.add('col-resizing');
+
+      const startX = e.clientX;
+      const startW = ths[i].getBoundingClientRect().width;
+
+      function onMove(e) {
+        const newW = Math.max(50, startW + (e.clientX - startX));
+        cols[i].style.width = newW + 'px';
+      }
+
+      function onUp() {
+        handle.classList.remove('active');
+        document.body.classList.remove('col-resizing');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+})();
+
+// --- Search ---
 async function doSearch() {
   const terms = textarea.value
     .split(/[\n\r,;]+/)
@@ -356,6 +554,9 @@ clearBtn.addEventListener('click', () => {
   hide(emptyState);
   hide(resultsCard);
   resultCount.textContent = '';
+  currentData = [];
+  sortColIdx  = -1;
+  sortDir     = 'asc';
   textarea.focus();
 });
 

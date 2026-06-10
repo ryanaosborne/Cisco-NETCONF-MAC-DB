@@ -89,10 +89,6 @@ Unknown paths are logged and dropped.
 
 - Docker and Docker Compose
 - `openssl` (for certificate generation)
-- `psql` or any PostgreSQL client (for running migrations)
-  ```
-  sudo apt-get install -y postgresql-client
-  ```
 
 ---
 
@@ -187,24 +183,15 @@ docker compose up -d
 
 This brings up five containers: `redpanda`, `postgres`, `nginx`, `collector`, `webapp`, and `consumer`. Kafka UI is commented out by default — see [Kafka UI](#kafka-ui) below if you need it for troubleshooting. Kafka UI is disabled by default — see [Kafka UI](#kafka-ui) below if you need it.
 
-### 4. Run Database Migrations
+### 4. Database Migrations
 
-Apply the migration file against the running PostgreSQL instance. Source `.env` first so the credentials match what the container was started with:
+Database migrations run automatically. `migrations/001_init.sql` is mounted into the PostgreSQL container and executed on first initialisation (when the data volume is empty). No manual migration step is required.
 
-```bash
-source .env
-psql "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:15432/${POSTGRES_DB}?sslmode=require" \
-  -f migrations/001_init.sql
-```
-
-The migration is idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running it is safe.
-
-### 4.5 Restart the Webapp Container
-
-After migrations complete, restart the webapp container so it picks up the newly created tables:
+If you ever need to start fresh, destroy the volume first:
 
 ```bash
-docker compose restart webapp
+docker compose down -v
+docker compose up -d
 ```
 
 ### 5. Configure Cisco Devices for MDT Dial-Out

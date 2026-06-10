@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS mac_table (
     vlan         INTEGER,
     mac_type     TEXT,
     collected_at TIMESTAMPTZ NOT NULL,
-    UNIQUE (mac_address)
+    UNIQUE (node_id, mac_address)
 );
 
 CREATE TABLE IF NOT EXISTS arp_table (
