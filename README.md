@@ -78,7 +78,8 @@ The collector recognises these IOS-XE YANG paths:
 | `Cisco-IOS-XE-arp-oper:arp-data/arp-vrf/arp-entry` | `arp-table` | ARP cache |
 | `arp-ios-xe-oper:arp-data/arp-vrf/arp-entry` | `arp-table` | ARP cache (alt path) |
 | `Cisco-IOS-XE-native:native/interface` | `interface-table` | Interface config |
-| `openconfig-vlan:vlans/vlan` | `vlan-table` | VLAN table |
+| `Cisco-IOS-XE-vlan-oper:vlans/vlan` | `vlan-table` | VLAN table (IOS-XE native) |
+| `openconfig-vlan:vlans/vlan` | `vlan-table` | VLAN table (OpenConfig alt path) |
 
 Unknown paths are logged and dropped.
 
@@ -211,41 +212,50 @@ docker compose restart webapp
 On each IOS-XE device, configure a telemetry subscription that dials out to the collector. Replace `<SERVER_IP>` with the IP address of the host running this stack.
 
 ```
-! Create a destination group pointing at the collector
 telemetry ietf subscription 101
  encoding encode-kvgpb
  filter xpath /matm-ios-xe-oper:matm-oper-data/matm-table/matm-mac-entry
- source-address <DEVICE_MGMT_IP>
  stream yang-push
- update-policy periodic 3000
+ update-policy periodic 500
  receiver ip address <SERVER_IP> 57400 protocol grpc-tcp
 
-telemetry ietf subscription 102
+telemetry ietf subscription 201
  encoding encode-kvgpb
  filter xpath /arp-ios-xe-oper:arp-data/arp-vrf/arp-entry
- source-address <DEVICE_MGMT_IP>
  stream yang-push
- update-policy periodic 3000
+ update-policy periodic 500
  receiver ip address <SERVER_IP> 57400 protocol grpc-tcp
 
-telemetry ietf subscription 103
+telemetry ietf subscription 301
  encoding encode-kvgpb
  filter xpath /ios:native/interface
- source-address <DEVICE_MGMT_IP>
+ stream yang-push
+ update-policy periodic 8640000
+ receiver ip address <SERVER_IP> 57400 protocol grpc-tcp
+
+telemetry ietf subscription 401
+ encoding encode-kvgpb
+ filter xpath /ios:native/interface
  stream yang-push
  update-policy on-change
  receiver ip address <SERVER_IP> 57400 protocol grpc-tcp
 
-telemetry ietf subscription 104
+telemetry ietf subscription 501
  encoding encode-kvgpb
- filter xpath /oc-vlan:vlans/vlan
- source-address <DEVICE_MGMT_IP>
+ filter xpath /vlan-ios-xe-oper:vlans/vlan
  stream yang-push
- update-policy periodic 6000
+ update-policy periodic 1000
+ receiver ip address <SERVER_IP> 57400 protocol grpc-tcp
+
+telemetry ietf subscription 601
+ encoding encode-kvgpb
+ filter xpath /vlan-ios-xe-oper:vlans/vlan
+ stream yang-push
+ update-policy on-change
  receiver ip address <SERVER_IP> 57400 protocol grpc-tcp
 ```
 
-The `update-policy periodic <ms>` value controls how often the device pushes data. `on-change` only streams when the data changes. Adjust to taste.
+Interface and VLAN subscriptions use both `periodic` (full state sync) and `on-change` (immediate delta when config changes). MAC and ARP use periodic only. The `periodic <ms>` value controls the push interval — adjust to taste.
 
 Verify the subscriptions are dialling out:
 

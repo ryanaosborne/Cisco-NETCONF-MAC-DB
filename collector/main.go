@@ -127,8 +127,8 @@ func (s *telemetryServer) dispatch(t *telpb.Telemetry) error {
 	}
 }
 
-// Get INT_DEBUG from environment to enable dumping raw telemetry fields for debugging purposes
-var intDebug = envOr("INT_DEBUG", "") != ""
+var intDebug  = envOr("INT_DEBUG",  "false") == "true"
+var vlanDebug = envOr("VLAN_DEBUG", "false") == "true"
 
 // showing each field's name, value type, and value (or child fields if it's a
 // container). Used to understand the raw structure coming from the switch.
@@ -184,7 +184,8 @@ func isInterface(path string) bool {
 }
 
 func isVlan(path string) bool {
-	return path == "openconfig-vlan:vlans/vlan"
+	return path == "openconfig-vlan:vlans/vlan" ||
+		path == "Cisco-IOS-XE-vlan-oper:vlans/vlan"
 }
 
 // expandIfName converts Cisco abbreviated interface names (e.g. "Gi1/0/1",
@@ -443,6 +444,13 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 // ── VLAN parser ──────────────────────────────────────────────────────────────
 
 func (s *telemetryServer) publishVlan(t *telpb.Telemetry) error {
+	if vlanDebug {
+		log.Printf("VLAN DEBUG node=%s path=%s collection_id=%d rows=%d",
+			t.NodeIdStr, t.EncodingPath, t.CollectionId, len(t.DataGpbkv))
+		for i, row := range t.DataGpbkv {
+			log.Printf("  row[%d] timestamp=%d\n%s", i, row.Timestamp, dumpFields(row.Fields, 2))
+		}
+	}
 	ts := time.UnixMilli(int64(t.MsgTimestamp))
 	for _, row := range t.DataGpbkv {
 		entry := VlanEntry{
@@ -452,23 +460,29 @@ func (s *telemetryServer) publishVlan(t *telpb.Telemetry) error {
 		for _, container := range row.Fields {
 			switch container.Name {
 			case "keys":
-				if f := findNestedField(container.Fields, "vlan-id"); f != nil {
+				// Cisco-IOS-XE-vlan-oper uses "id"; openconfig-vlan uses "vlan-id"
+				if f := findNestedField(container.Fields, "id"); f != nil {
+					entry.VlanID = f.GetUint32Value()
+				} else if f := findNestedField(container.Fields, "vlan-id"); f != nil {
 					entry.VlanID = f.GetUint32Value()
 				}
 			case "content":
-				// state always carries name (synthesized as "VLANxxxx" if not configured)
-				// and status; config may omit name, so we prefer state.
-				for _, sub := range container.Fields {
-					if sub.Name == "state" {
-						for _, f := range sub.Fields {
-							switch f.Name {
-							case "name":
-								entry.Name = f.GetStringValue()
-							case "status":
-								entry.Status = f.GetStringValue()
-							}
-						}
-						break
+				// Cisco-IOS-XE-vlan-oper: name and status are direct children of content
+				if f := findNestedField(container.Fields, "name"); f != nil {
+					entry.Name = f.GetStringValue()
+				}
+				if f := findNestedField(container.Fields, "status"); f != nil {
+					entry.Status = f.GetStringValue()
+				}
+				// openconfig-vlan: name and status are nested under content → state
+				if entry.Name == "" {
+					if f := findNestedField(container.Fields, "state", "name"); f != nil {
+						entry.Name = f.GetStringValue()
+					}
+				}
+				if entry.Status == "" {
+					if f := findNestedField(container.Fields, "state", "status"); f != nil {
+						entry.Status = f.GetStringValue()
 					}
 				}
 			}
