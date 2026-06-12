@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "PortFinder API",
-    "description": "Look up where a device is connected on the network. Query Cisco IOS-XE telemetry data by MAC address or IP address to find the switch port, VLAN, and interface details. Accepts multiple terms per request and supports colon, hyphen, Cisco dot, and bare hex MAC formats (all case-insensitive).",
+    "description": "Look up where a device is connected on the network. Query Cisco IOS-XE telemetry data by MAC address or IP address to find the switch port, VLAN, and interface details. Accepts multiple terms per request and supports colon, hyphen, Cisco dot, and bare hex MAC formats (all case-insensitive).\n\n**Authentication:** API requests are authenticated either by your browser SAML session (when calling from this docs page) or by a personal access token sent as `Authorization: Bearer pfk_...`. Generate and manage tokens on the [API Tokens](/tokens) page. Tokens let scripts and applications call the API without dealing with SAML cookies.",
     "version": "1.0.0"
   },
   "servers": [
@@ -14,6 +14,7 @@
         "summary": "Search by MAC or IP address",
         "description": "Returns all matching rows from the telemetry database. Each term is classified as a MAC address or IP address and looked up accordingly. A single request may mix MACs and IPs.\n\n**Accepted MAC formats** (all case-insensitive):\n- Colon-separated: `aa:bb:cc:dd:ee:ff`\n- Hyphen-separated: `aa-bb-cc-dd-ee-ff`\n- Cisco dot notation: `aabb.ccdd.eeff`\n- Bare hex: `aabbccddeeff`",
         "operationId": "search",
+        "security": [ { "bearerAuth": [] }, {} ],
         "requestBody": {
           "required": true,
           "content": {
@@ -56,8 +57,10 @@
                     "ip_address": "10.0.0.203",
                     "interface": "GigabitEthernet1/0/4",
                     "interface_description": "User access port",
-                    "vlan": 100,
-                    "vlan_name": "USERS"
+                    "access_vlan": 100,
+                    "access_vlan_name": "USERS",
+                    "voice_vlan": 200,
+                    "voice_vlan_name": "VOICE"
                   }
                 ]
               }
@@ -65,6 +68,12 @@
           },
           "400": {
             "description": "Request body is not valid JSON.",
+            "content": {
+              "text/plain": { "schema": { "type": "string" } }
+            }
+          },
+          "401": {
+            "description": "Bearer token is invalid, expired, or revoked.",
             "content": {
               "text/plain": { "schema": { "type": "string" } }
             }
@@ -77,9 +86,66 @@
           }
         }
       }
+    },
+    "/api/rdns": {
+      "get": {
+        "summary": "Reverse DNS lookup for an IP address",
+        "description": "Resolves an IPv4 address to a hostname via a reverse DNS (PTR) lookup. Returns the first hostname found with the trailing dot removed. The lookup times out after 3 seconds; on timeout, lookup failure, or when no PTR record exists, the response is still `200` with `hostname` set to `null`.",
+        "operationId": "rdns",
+        "security": [ { "bearerAuth": [] }, {} ],
+        "parameters": [
+          {
+            "name": "ip",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "format": "ipv4" },
+            "description": "IPv4 address in dotted-quad notation.",
+            "example": "10.0.0.203"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lookup completed. `hostname` is null when the address has no PTR record or the lookup failed/timed out.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RDNSResponse" },
+                "examples": {
+                  "resolved": {
+                    "summary": "PTR record found",
+                    "value": { "hostname": "workstation-42.example.com" }
+                  },
+                  "unresolved": {
+                    "summary": "No PTR record",
+                    "value": { "hostname": null }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The `ip` parameter is missing or is not a valid IPv4 address.",
+            "content": {
+              "text/plain": { "schema": { "type": "string" } }
+            }
+          },
+          "401": {
+            "description": "Bearer token is invalid, expired, or revoked.",
+            "content": {
+              "text/plain": { "schema": { "type": "string" } }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Personal access token generated on the /tokens page (format: pfk_...). Alternative to the SAML browser session."
+      }
+    },
     "schemas": {
       "SearchRequest": {
         "type": "object",
@@ -126,17 +192,41 @@
             "description": "Configured interface description.",
             "example": "User access port"
           },
-          "vlan": {
+          "access_vlan": {
             "type": "integer",
             "nullable": true,
-            "description": "VLAN number.",
+            "description": "Access (data) VLAN configured on the interface. Null when no interface configuration is available.",
             "example": 100
           },
-          "vlan_name": {
+          "access_vlan_name": {
             "type": "string",
             "nullable": true,
-            "description": "VLAN name.",
+            "description": "Name of the access (data) VLAN.",
             "example": "USERS"
+          },
+          "voice_vlan": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Voice VLAN configured on the interface. Null when no voice VLAN is configured.",
+            "example": 200
+          },
+          "voice_vlan_name": {
+            "type": "string",
+            "nullable": true,
+            "description": "Name of the voice VLAN.",
+            "example": "VOICE"
+          }
+        }
+      },
+      "RDNSResponse": {
+        "type": "object",
+        "required": ["hostname"],
+        "properties": {
+          "hostname": {
+            "type": "string",
+            "nullable": true,
+            "description": "Hostname from the PTR record (trailing dot removed), or null when the lookup found nothing.",
+            "example": "workstation-42.example.com"
           }
         }
       }

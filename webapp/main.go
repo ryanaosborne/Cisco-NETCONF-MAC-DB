@@ -30,6 +30,9 @@ var swaggerHTML string
 //go:embed dbview.html
 var dbviewHTML string
 
+//go:embed tokens.html
+var tokensHTML string
+
 //go:embed openapi.json
 var openapiJSON []byte
 
@@ -229,8 +232,6 @@ type Result struct {
 	IPAddress            *string `json:"ip_address"`
 	Interface            *string `json:"interface"`
 	InterfaceDescription *string `json:"interface_description"`
-	Vlan                 *int32  `json:"vlan"`
-	VlanName             *string `json:"vlan_name"`
 	AccessVlan           *int32  `json:"access_vlan"`
 	AccessVlanName       *string `json:"access_vlan_name"`
 	VoiceVlan            *int32  `json:"voice_vlan"`
@@ -272,7 +273,7 @@ best_mac AS (
     -- upstream), prefer the physical access port entry over logical interfaces.
     -- Ties on rank fall back to most-recent collected_at.
     SELECT DISTINCT ON (mac_address)
-        node_id, mac_address, interface, vlan, collected_at
+        node_id, mac_address, interface, collected_at
     FROM mac_table
     ORDER BY mac_address,
         CASE
@@ -290,8 +291,6 @@ SELECT
     a.ip_address,
     m.interface,
     i.description  AS interface_description,
-    m.vlan,
-    v.name         AS vlan_name,
     i.access_vlan,
     dv.name        AS access_vlan_name,
     i.voice_vlan,
@@ -299,7 +298,6 @@ SELECT
 FROM best_mac m
 LEFT JOIN latest_arp      a  ON  m.mac_address  = a.mac_address
 LEFT JOIN interface_table i  ON  m.node_id      = i.node_id AND m.interface   = i.name
-LEFT JOIN vlan_table      v  ON  m.node_id      = v.node_id AND m.vlan        = v.vlan_id
 LEFT JOIN vlan_table      dv ON  m.node_id      = dv.node_id AND i.access_vlan = dv.vlan_id
 LEFT JOIN vlan_table      vv ON  m.node_id      = vv.node_id AND i.voice_vlan  = vv.vlan_id
 WHERE lower(m.mac_address) = ANY($1) OR a.ip_address = ANY($2)
@@ -311,8 +309,6 @@ SELECT
     COALESCE(a.mac_address, ''),
     a.ip_address,
     NULL::text,
-    NULL::text,
-    NULL::integer,
     NULL::text,
     NULL::smallint,
     NULL::text,
@@ -420,7 +416,6 @@ func handleSearch(db *pgxpool.Pool) http.HandlerFunc {
 			if err := rows.Scan(
 				&res.NodeID, &res.MacAddress, &res.IPAddress,
 				&res.Interface, &res.InterfaceDescription,
-				&res.Vlan, &res.VlanName,
 				&res.AccessVlan, &res.AccessVlanName,
 				&res.VoiceVlan, &res.VoiceVlanName,
 			); err != nil {
@@ -535,6 +530,8 @@ func main() {
 		log.Fatalf("postgres ping: %v", err)
 	}
 
+	ensureTokenTable(db)
+
 	samlMiddleware := setupSAML()
 
 	// protect wraps a handler behind SAML when enabled; otherwise it's a no-op.
@@ -571,8 +568,20 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(openapiJSON)
 	})
-	mux.Handle("/api/search", protect(handleSearch(db)))
-	mux.Handle("/api/rdns", protect(handleRDNS()))
+	// Data endpoints accept either a bearer API token or a SAML session.
+	apiAuth := bearerOrSAML(db, samlMiddleware)
+	mux.Handle("/api/search", apiAuth(handleSearch(db)))
+	mux.Handle("/api/rdns", apiAuth(handleRDNS()))
+
+	// Token management requires a browser SAML session only — a leaked
+	// bearer token must not be able to mint or revoke tokens.
+	mux.Handle("/tokens", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, tokensHTML)
+	})))
+	mux.Handle("GET /api/tokens", protect(handleTokenList(db)))
+	mux.Handle("POST /api/tokens", protect(handleTokenCreate(db)))
+	mux.Handle("DELETE /api/tokens/{id}", protect(handleTokenRevoke(db)))
 
 	if dbviewEnabled {
 		mux.Handle("/dbview", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

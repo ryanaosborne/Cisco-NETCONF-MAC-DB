@@ -46,6 +46,25 @@ CREATE TABLE IF NOT EXISTS vlan_table (
     UNIQUE (node_id, vlan_id)
 );
 
+-- Personal access tokens for API access without a SAML browser session.
+-- Only the SHA-256 hash of a token is stored; the plaintext is shown to the
+-- user once at creation and is never persisted.
+--
+-- Note: the webapp also runs this DDL (idempotently) at startup, because
+-- files in docker-entrypoint-initdb.d only execute on a fresh postgres
+-- volume.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           BIGSERIAL PRIMARY KEY,
+    user_id      TEXT        NOT NULL,
+    name         TEXT        NOT NULL,
+    token_hash   TEXT        NOT NULL UNIQUE,
+    token_hint   TEXT        NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    revoked_at   TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS mac_table_mac_address   ON mac_table  (mac_address);
 CREATE INDEX IF NOT EXISTS arp_table_ip_address    ON arp_table  (ip_address);
 CREATE INDEX IF NOT EXISTS arp_table_mac_address   ON arp_table  (mac_address);
@@ -53,3 +72,4 @@ CREATE INDEX IF NOT EXISTS interface_table_node    ON interface_table (node_id, 
 CREATE INDEX IF NOT EXISTS interface_table_ip      ON interface_table (ip_address);
 CREATE INDEX IF NOT EXISTS interface_table_vlan    ON interface_table (node_id, access_vlan);
 CREATE INDEX IF NOT EXISTS vlan_table_vlan_id      ON vlan_table (vlan_id);
+CREATE INDEX IF NOT EXISTS api_tokens_user         ON api_tokens (user_id);

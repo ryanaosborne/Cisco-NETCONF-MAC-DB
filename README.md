@@ -175,6 +175,24 @@ SAML_SP_KEY_FILE=./certs/saml/sp.key
 
 When enabled, all routes (`/`, `/swagger`, `/api/search`) require a valid Azure AD session. The `/saml/` callback routes and `/api/openapi.json` are always accessible without authentication.
 
+#### API Tokens (programmatic access)
+
+Scripts and applications can't complete a SAML browser login, so PortFinder supports personal access tokens as an alternative credential for the data API (`/api/search`, `/api/rdns`). Users generate and manage their own tokens on the **/tokens** page (linked from the search page header) after signing in via SAML.
+
+```bash
+curl -H "Authorization: Bearer pfk_..." \
+  -H "Content-Type: application/json" \
+  -d '{"terms": ["aa:bb:cc:dd:ee:ff"]}' \
+  https://your-app.example.com/api/search
+```
+
+Security properties:
+
+- Tokens are 256-bit random values (`pfk_` prefix) shown **once** at creation; only the SHA-256 hash is stored in the `api_tokens` table, so a database compromise does not expose usable credentials.
+- Tokens expire after 90 days by default (30 days / 1 year / never are selectable), can be revoked instantly from the /tokens page, and record a `last_used_at` timestamp for auditing.
+- Each user is limited to 10 active tokens and can only see and revoke their own (keyed to their Azure AD UPN).
+- Token management itself (`/tokens`, `GET|POST|DELETE /api/tokens`) requires a SAML browser session — a leaked bearer token cannot be used to mint or revoke tokens.
+
 ### 3. Start the Stack
 
 ```bash
@@ -185,7 +203,7 @@ This brings up five containers: `redpanda`, `postgres`, `nginx`, `collector`, `w
 
 ### 4. Database Migrations
 
-Database migrations run automatically. `migrations/001_init.sql` is mounted into the PostgreSQL container and executed on first initialisation (when the data volume is empty). No manual migration step is required.
+Database migrations run automatically. `migrations/001_init.sql` is mounted into the PostgreSQL container and executed on first initialisation (when the data volume is empty). No manual migration step is required. The `api_tokens` table is also created idempotently by the webapp at startup, so existing deployments pick it up without recreating the data volume.
 
 If you ever need to start fresh, destroy the volume first:
 
