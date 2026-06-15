@@ -48,8 +48,13 @@ type VlanEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 	NodeID    string    `json:"node_id"`
 	VlanID    uint32    `json:"vlan_id"`
-	Name      string    `json:"name,omitempty"`
-	Status    string    `json:"status,omitempty"`
+	// Name is a pointer so the three telemetry states stay distinct on the wire:
+	//   nil  -> field absent (periodic push of a nameless VLAN) -> DB no-op
+	//   &""  -> field present and empty (on-change push of a removed name) -> clear
+	//   &"x" -> field present with a value -> set
+	// omitempty only fires on nil, which is exactly the "absent" case.
+	Name   *string `json:"name,omitempty"`
+	Status string  `json:"status,omitempty"`
 }
 
 type ArpEntry struct {
@@ -62,17 +67,24 @@ type ArpEntry struct {
 }
 
 type IfEntry struct {
-	Timestamp   time.Time `json:"timestamp"`
-	NodeID      string    `json:"node_id"`
-	Name        string    `json:"name"`
-	Description *string    `json:"description"`
-	Shutdown    bool      `json:"shutdown"`
-	IPAddress   string    `json:"ip_address,omitempty"`
-	PrefixLen   int       `json:"prefix_len,omitempty"`
-	VRF         string    `json:"vrf,omitempty"`
-	MTU         uint32    `json:"mtu,omitempty"`
-	AccessVlan  *uint16   `json:"access_vlan"` // null when not present in message
-	VoiceVlan   *uint16   `json:"voice_vlan"`  // null when not present in message
+	Timestamp time.Time `json:"timestamp"`
+	NodeID    string    `json:"node_id"`
+	Name      string    `json:"name"`
+	// Config-tracked fields are pointers so the three telemetry states stay
+	// distinct on the wire, exactly like VlanEntry.Name:
+	//   nil    -> field absent (periodic push that omits it)   -> DB no-op
+	//   &""/&0 -> field present but empty (on-change removal)   -> clear
+	//   &"x"   -> field present with a value                    -> set
+	// The collector therefore captures these whenever the field node is present
+	// in the message, regardless of value, instead of suppressing empties.
+	Description *string `json:"description"`
+	Shutdown    bool    `json:"shutdown"`
+	IPAddress   *string `json:"ip_address"`
+	PrefixLen   *int    `json:"prefix_len"`
+	VRF         string  `json:"vrf,omitempty"`
+	MTU         uint32  `json:"mtu,omitempty"`
+	AccessVlan  *uint16 `json:"access_vlan"`
+	VoiceVlan   *uint16 `json:"voice_vlan"`
 }
 
 // ── gRPC server ─────────────────────────────────────────────────────────────
@@ -100,7 +112,7 @@ func (s *telemetryServer) MdtDialout(stream telpb.GRPCMdtDialout_MdtDialoutServe
 			log.Printf("unmarshal telemetry: %v", err)
 			continue
 		}
-		log.Printf("received msg from %s collection_id=%d path=%s", msg.NodeIdStr, msg.CollectionId, msg.EncodingPath)
+		log.Printf("received msg from %s collection_id=%d path=%s rows=%d", msg.NodeIdStr, msg.CollectionId, msg.EncodingPath, len(msg.DataGpbkv))
 		if err := s.dispatch(msg); err != nil {
 			log.Printf("dispatch error for node %s: %v", msg.NodeIdStr, err)
 		}
@@ -193,6 +205,7 @@ func isVlan(path string) bool {
 func expandIfName(s string) string {
 	prefixes := [][2]string{
 		{"GigabitEthernet", "Gi"},
+		{"FiveGigabitEthernet", "Fi"},
 		{"TenGigabitEthernet", "Te"},
 		{"FastEthernet", "Fa"},
 		{"HundredGigE", "Hu"},
@@ -216,6 +229,7 @@ func expandIfName(s string) string {
 
 func (s *telemetryServer) publishMAC(t *telpb.Telemetry) error {
 	ts := time.UnixMilli(int64(t.MsgTimestamp))
+	entries := make([]MacEntry, 0, len(t.DataGpbkv))
 	for _, row := range t.DataGpbkv {
 		entry := MacEntry{
 			Timestamp: ts,
@@ -247,17 +261,24 @@ func (s *telemetryServer) publishMAC(t *telpb.Telemetry) error {
 		if entry.MacAddress == "" {
 			continue
 		}
-		if err := s.publish("mac-table", entry.MacAddress, entry); err != nil {
-			return err
-		}
+		entries = append(entries, entry)
 	}
-	return nil
+	if len(entries) == 0 {
+		return nil
+	}
+	msg, err := buildMsg("mac-table", t.NodeIdStr, entries)
+	if err != nil {
+		return err
+	}
+	_, _, err = s.producer.SendMessage(msg)
+	return err
 }
 
 // ── ARP table parser ─────────────────────────────────────────────────────────
 
 func (s *telemetryServer) publishARP(t *telpb.Telemetry) error {
 	ts := time.UnixMilli(int64(t.MsgTimestamp))
+	entries := make([]ArpEntry, 0, len(t.DataGpbkv))
 	for _, row := range t.DataGpbkv {
 		entry := ArpEntry{
 			Timestamp: ts,
@@ -287,11 +308,17 @@ func (s *telemetryServer) publishARP(t *telpb.Telemetry) error {
 		if entry.IPAddress == "" {
 			continue
 		}
-		if err := s.publish("arp-table", entry.IPAddress, entry); err != nil {
-			return err
-		}
+		entries = append(entries, entry)
 	}
-	return nil
+	if len(entries) == 0 {
+		return nil
+	}
+	msg, err := buildMsg("arp-table", t.NodeIdStr, entries)
+	if err != nil {
+		return err
+	}
+	_, _, err = s.producer.SendMessage(msg)
+	return err
 }
 
 // ── Interface config parser ──────────────────────────────────────────────────
@@ -376,10 +403,11 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 						entry.Name = fmt.Sprintf("%s%d", ifType, f.GetUint32Value())
 					}
 				case "description":
-					if s := f.GetStringValue(); s != "" {
-						entry.Description = &s
-					}
-					
+					// Capture whenever the field is present: an empty value is a
+					// removed description (clear), distinct from the field being
+					// absent (no-op). Mirrors the VLAN name handling.
+					desc := f.GetStringValue()
+					entry.Description = &desc
 				case "mtu":
 					entry.MTU = f.GetUint32Value()
 				case "shutdown":
@@ -389,43 +417,44 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 						entry.VRF = fw.GetStringValue()
 					}
 				case "ip":
+					// Capture address/prefix whenever the field node is present so a
+					// removed IP (present, empty) clears the stored value, while an
+					// absent ip container (nil) is a no-op.
 					if addr := findNestedField(f.Fields, "address", "primary", "address"); addr != nil {
-						entry.IPAddress = addr.GetStringValue()
+						v := addr.GetStringValue()
+						entry.IPAddress = &v
 					}
 					if mask := findNestedField(f.Fields, "address", "primary", "mask"); mask != nil {
-						entry.PrefixLen = maskToPrefixLen(mask.GetStringValue())
+						p := maskToPrefixLen(mask.GetStringValue())
+						entry.PrefixLen = &p
 					}
 				case "switchport-config":
 					// Cisco-IOS-XE-switch augments switchport-config/switchport with
-					// access/vlan/vlan and voice/vlan/vlan integers.
+					// access/vlan/vlan and voice/vlan/vlan integers. Capture whenever
+					// the vlan node is present (even value 0) so a removed assignment
+					// clears the stored value; an absent node stays nil (no-op).
 					if v := findNestedField(f.Fields, "switchport", "voice", "vlan", "vlan"); v != nil {
-						if n := v.GetUint32Value(); n != 0 {
-							vv := uint16(n)
-							entry.VoiceVlan = &vv
-						}
+						vv := uint16(v.GetUint32Value())
+						entry.VoiceVlan = &vv
 					}
 					if a := findNestedField(f.Fields, "switchport", "access", "vlan", "vlan"); a != nil {
-						if n := a.GetUint32Value(); n != 0 {
-							av := uint16(n)
-							entry.AccessVlan = &av
-						}
+						av := uint16(a.GetUint32Value())
+						entry.AccessVlan = &av
 					}
 				case "switchport":
-					// Also check the bare switchport container (duplicate in some IOS-XE versions).
+					// Also check the bare switchport container (duplicate in some
+					// IOS-XE versions). Used only as a fallback when switchport-config
+					// did not already supply the value.
 					if entry.VoiceVlan == nil {
 						if v := findNestedField(f.Fields, "voice", "vlan", "vlan"); v != nil {
-							if n := v.GetUint32Value(); n != 0 {
-								vv := uint16(n)
-								entry.VoiceVlan = &vv
-							}
+							vv := uint16(v.GetUint32Value())
+							entry.VoiceVlan = &vv
 						}
 					}
 					if entry.AccessVlan == nil {
 						if a := findNestedField(f.Fields, "access", "vlan", "vlan"); a != nil {
-							if n := a.GetUint32Value(); n != 0 {
-								av := uint16(n)
-								entry.AccessVlan = &av
-							}
+							av := uint16(a.GetUint32Value())
+							entry.AccessVlan = &av
 						}
 					}
 				}
@@ -467,17 +496,25 @@ func (s *telemetryServer) publishVlan(t *telpb.Telemetry) error {
 					entry.VlanID = f.GetUint32Value()
 				}
 			case "content":
-				// Cisco-IOS-XE-vlan-oper: name and status are direct children of content
+				// Cisco-IOS-XE-vlan-oper: name and status are direct children of
+				// content. Capture name as a pointer only when the field is actually
+				// present, so an absent name (nil) stays distinct from an explicit
+				// empty name (&""). An on-change push for a removed VLAN name arrives
+				// here as a present, empty-valued field.
 				if f := findNestedField(container.Fields, "name"); f != nil {
-					entry.Name = f.GetStringValue()
+					v := f.GetStringValue()
+					entry.Name = &v
 				}
 				if f := findNestedField(container.Fields, "status"); f != nil {
 					entry.Status = f.GetStringValue()
 				}
-				// openconfig-vlan: name and status are nested under content → state
-				if entry.Name == "" {
+				// openconfig-vlan: name and status are nested under content → state.
+				// Only fall back when the direct "name" field was truly absent, so an
+				// explicit empty name is not overwritten by the state lookup.
+				if entry.Name == nil {
 					if f := findNestedField(container.Fields, "state", "name"); f != nil {
-						entry.Name = f.GetStringValue()
+						v := f.GetStringValue()
+						entry.Name = &v
 					}
 				}
 				if entry.Status == "" {
@@ -499,17 +536,24 @@ func (s *telemetryServer) publishVlan(t *telpb.Telemetry) error {
 }
 
 
-// ── Kafka publish helper ─────────────────────────────────────────────────────
+// ── Kafka publish helpers ────────────────────────────────────────────────────
 
-func (s *telemetryServer) publish(topic, key string, v any) error {
+func buildMsg(topic, key string, v any) (*sarama.ProducerMessage, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("marshal: %w", err)
 	}
-	msg := &sarama.ProducerMessage{
+	return &sarama.ProducerMessage{
 		Topic: topic,
 		Key:   sarama.StringEncoder(key),
 		Value: sarama.ByteEncoder(b),
+	}, nil
+}
+
+func (s *telemetryServer) publish(topic, key string, v any) error {
+	msg, err := buildMsg(topic, key, v)
+	if err != nil {
+		return err
 	}
 	_, _, err = s.producer.SendMessage(msg)
 	return err

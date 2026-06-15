@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -517,6 +518,36 @@ func setupSAML() *samlsp.Middleware {
 	return middleware
 }
 
+// roleClaimNames are the attribute names under which IdPs deliver app role
+// assignments. Azure AD / Entra ID uses the full claim URI.
+var roleClaimNames = []string{
+	"http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
+	"roles",
+	"role",
+}
+
+// hasAdminRole reports whether the SAML session carries adminRole. An empty
+// adminRole (feature unconfigured) or disabled SAML grants access to everyone,
+// preserving pre-role behaviour.
+func hasAdminRole(r *http.Request, samlEnabled bool, adminRole string) bool {
+	if !samlEnabled || adminRole == "" {
+		return true
+	}
+	sa, ok := samlsp.SessionFromContext(r.Context()).(samlsp.SessionWithAttributes)
+	if !ok {
+		return false
+	}
+	attrs := sa.GetAttributes()
+	for _, name := range roleClaimNames {
+		for _, v := range attrs[name] {
+			if v == adminRole {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func main() {
 	dsn := envOr("POSTGRES_DSN", "postgres://telemetry:telemetry@localhost:15432/telemetry?sslmode=require")
 
@@ -542,6 +573,25 @@ func main() {
 		return samlMiddleware.RequireAccount(h)
 	}
 
+	// Token management and API docs can be restricted to users holding an
+	// Azure AD app role (SAML_ADMIN_ROLE). Unset = open to all signed-in users.
+	adminRole := os.Getenv("SAML_ADMIN_ROLE")
+	isAdmin := func(r *http.Request) bool {
+		return hasAdminRole(r, samlMiddleware != nil, adminRole)
+	}
+	protectAdmin := func(h http.Handler) http.Handler {
+		return protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !isAdmin(r) {
+				http.Error(w, "forbidden: this page requires the "+adminRole+" role", http.StatusForbidden)
+				return
+			}
+			h.ServeHTTP(w, r)
+		}))
+	}
+	if samlMiddleware != nil && adminRole != "" {
+		log.Printf("saml: /tokens and /swagger restricted to role %q", adminRole)
+	}
+
 	dbviewEnabled := os.Getenv("DBVIEW_ENABLED") == "true"
 
 	servedIndexHTML := indexHTML
@@ -557,31 +607,76 @@ func main() {
 	}
 
 	mux.Handle("/", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := servedIndexHTML
+		if !isAdmin(r) {
+			page = strings.ReplaceAll(page,
+				`<a class="menu-link" href="/swagger" target="_blank">API Docs</a>`, "")
+			page = strings.ReplaceAll(page,
+				`<a class="menu-link" href="/tokens">API Tokens</a>`, "")
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, servedIndexHTML)
+		fmt.Fprint(w, page)
 	})))
-	mux.Handle("/swagger", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/swagger", protectAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, swaggerHTML)
 	})))
-	mux.HandleFunc("/api/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/openapi.json", protectAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(openapiJSON)
-	})
+	})))
+	// Identity for the header user menu. Browser-session only.
+	mux.Handle("/api/me", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"user": samlUser(r)})
+	})))
+
+	// Logout clears the local session cookie, then propagates the logout to
+	// the IdP via SAML SLO when its metadata advertises a redirect endpoint
+	// (Azure AD does). The IdP's LogoutResponse comes back on /saml/slo,
+	// which the samlsp middleware handles.
+	mux.Handle("/logout", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if samlMiddleware == nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		// The IdP LogoutRequest must carry the same NameID the IdP issued;
+		// it is stored as the session JWT subject.
+		nameID := ""
+		if s := samlsp.SessionFromContext(r.Context()); s != nil {
+			if jc, ok := s.(samlsp.JWTSessionClaims); ok {
+				nameID = jc.Subject
+			}
+		}
+		if err := samlMiddleware.Session.DeleteSession(w, r); err != nil {
+			log.Printf("logout: delete session: %v", err)
+		}
+		if nameID != "" && samlMiddleware.ServiceProvider.GetSLOBindingLocation(saml.HTTPRedirectBinding) != "" {
+			u, err := samlMiddleware.ServiceProvider.MakeRedirectLogoutRequest(nameID, "")
+			if err == nil {
+				http.Redirect(w, r, u.String(), http.StatusFound)
+				return
+			}
+			log.Printf("logout: make IdP logout request: %v", err)
+		}
+		http.Redirect(w, r, "/", http.StatusFound)
+	})))
+
 	// Data endpoints accept either a bearer API token or a SAML session.
 	apiAuth := bearerOrSAML(db, samlMiddleware)
 	mux.Handle("/api/search", apiAuth(handleSearch(db)))
 	mux.Handle("/api/rdns", apiAuth(handleRDNS()))
 
 	// Token management requires a browser SAML session only — a leaked
-	// bearer token must not be able to mint or revoke tokens.
-	mux.Handle("/tokens", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// bearer token must not be able to mint or revoke tokens. With
+	// SAML_ADMIN_ROLE set it additionally requires that Azure app role.
+	mux.Handle("/tokens", protectAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, tokensHTML)
 	})))
-	mux.Handle("GET /api/tokens", protect(handleTokenList(db)))
-	mux.Handle("POST /api/tokens", protect(handleTokenCreate(db)))
-	mux.Handle("DELETE /api/tokens/{id}", protect(handleTokenRevoke(db)))
+	mux.Handle("GET /api/tokens", protectAdmin(handleTokenList(db)))
+	mux.Handle("POST /api/tokens", protectAdmin(handleTokenCreate(db)))
+	mux.Handle("DELETE /api/tokens/{id}", protectAdmin(handleTokenRevoke(db)))
 
 	if dbviewEnabled {
 		mux.Handle("/dbview", protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

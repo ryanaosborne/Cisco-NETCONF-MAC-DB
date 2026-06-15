@@ -18,6 +18,11 @@ services:
       - "9644:9644"
     volumes:
       - redpanda-data:/var/lib/redpanda
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
       interval: 5s
@@ -26,6 +31,21 @@ services:
       start_period: 15s
     networks:
       - telemetry
+
+  redpanda-setup:
+    image: redpandadata/redpanda:v24.1.6
+    container_name: redpanda-setup
+    entrypoint: ["/bin/bash", "-c"]
+    command: >-
+      rpk cluster config set log_segment_size 67108864 --api-urls http://redpanda:9644 &&
+      rpk cluster config set log_retention_ms 3600000 --api-urls http://redpanda:9644 &&
+      rpk cluster config set log_retention_bytes 268435456 --api-urls http://redpanda:9644
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - telemetry
+    restart: "no"
 
   postgres:
     image: postgres:16
@@ -53,6 +73,11 @@ services:
       - ./postgres/ssl-entrypoint.sh:/postgres-ssl-entrypoint.sh:ro
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT 1 FROM mac_table LIMIT 1' && echo 'healthy' || echo 'not ready'"]
       interval: 5s
@@ -92,9 +117,15 @@ services:
   nginx:
     image: nginx:alpine
     container_name: nginx
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     depends_on:
       # - kafka-ui   # uncomment when kafka-ui is enabled (step 2)
       - webapp
+      - webapp_dev
     ports:
       - "80:80"
       - "443:443"
@@ -102,6 +133,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./certs/nginx:/certs:ro
+      - ./ext:/ext:ro
     networks:
       - telemetry
 
@@ -110,14 +142,19 @@ services:
       context: .
       dockerfile: collector/Dockerfile
     container_name: collector
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     ports:
       - "57400:57400"     # Cisco MDT default port
     environment:
       KAFKA_BROKER: redpanda:9092
       VLAN_DEBUG: ${VLAN_DEBUG:-false}
       INT_DEBUG: ${INT_DEBUG:-false}
-      GRPC_GO_LOG_VERBOSITY_LEVEL: "99"
-      GRPC_GO_LOG_SEVERITY_LEVEL: "info"
+      GRPC_GO_LOG_VERBOSITY_LEVEL: "0"
+      GRPC_GO_LOG_SEVERITY_LEVEL: "error"
     depends_on:
       redpanda:
         condition: service_healthy
@@ -129,6 +166,11 @@ services:
       context: .
       dockerfile: webapp/Dockerfile
     container_name: webapp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     # Port not bound to host — accessible via nginx on port 443
     environment:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require
@@ -137,7 +179,11 @@ services:
       SAML_SP_ROOT_URL: ${SAML_SP_ROOT_URL:-}
       SAML_SP_CERT_FILE: /app/certs/saml/sp.crt
       SAML_SP_KEY_FILE: /app/certs/saml/sp.key
+      SAML_ADMIN_ROLE: ${SAML_ADMIN_ROLE:-}
       DBVIEW_ENABLED: ${DBVIEW_ENABLED:-false}
+      PA_FIREWALLS: ${PA_FIREWALLS:-}
+      PA_TOKEN: ${PA_TOKEN:-}
+      PA_TLS_SKIP_VERIFY: ${PA_TLS_SKIP_VERIFY:-false}
     volumes:
       - ./certs/saml:/app/certs/saml:ro
     depends_on:
@@ -151,6 +197,11 @@ services:
       context: .
       dockerfile: consumer/Dockerfile
     container_name: consumer
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       KAFKA_BROKER: redpanda:9092
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=require

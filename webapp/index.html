@@ -38,6 +38,77 @@
   }
   .api-link:hover { background: rgba(255,255,255,0.25); }
 
+  /* Waffle user menu */
+  .user-menu { position: relative; flex-shrink: 0; }
+  .waffle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.4rem;
+    height: 2.4rem;
+    padding: 0;
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    border-radius: 0.4rem;
+    color: white;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .waffle-btn:hover { background: rgba(255,255,255,0.25); }
+  .waffle-btn svg { display: block; }
+  .user-dropdown {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.5rem);
+    min-width: 230px;
+    background: white;
+    color: #1e293b;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+    overflow: hidden;
+    z-index: 20;
+  }
+  .user-email {
+    padding: 0.75rem 1rem;
+    font-size: 0.8125rem;
+    color: #475569;
+    border-bottom: 1px solid #f1f5f9;
+    word-break: break-all;
+  }
+  .user-email .user-email-label {
+    display: block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.2rem;
+  }
+  .user-dropdown .menu-link {
+    display: block;
+    padding: 0.65rem 1rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #1e293b;
+    text-decoration: none;
+  }
+  .user-dropdown .menu-link:hover { background: #f8fafc; }
+  .logout-btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.65rem 1rem;
+    background: white;
+    color: #dc2626;
+    border: none;
+    border-top: 1px solid #f1f5f9;
+    border-radius: 0;
+    font-size: 0.8125rem;
+    font-weight: 500;
+  }
+  .logout-btn:hover { background: #fef2f2; }
+
   main { padding: 1.5rem 1rem; }
 
   .card {
@@ -68,7 +139,7 @@
     line-height: 1.6;
     color: #1e293b;
     resize: vertical;
-    min-height: 120px;
+    min-height: 144px;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
   }
@@ -247,16 +318,32 @@
       <h1>PortFinder</h1>
       <p>Look up where a device is connected — search by MAC address or IP address</p>
     </div>
-    <a class="api-link" href="/swagger" target="_blank">API Docs</a>
-    <a class="api-link" href="/tokens">API Tokens</a>
     <a class="api-link" href="/dbview">DB Inspector</a>
+    <div class="user-menu">
+      <button class="waffle-btn" id="waffle-btn" aria-label="User menu" aria-haspopup="true" aria-expanded="false">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor" aria-hidden="true">
+          <circle cx="3"  cy="3"  r="1.7"/><circle cx="9"  cy="3"  r="1.7"/><circle cx="15" cy="3"  r="1.7"/>
+          <circle cx="3"  cy="9"  r="1.7"/><circle cx="9"  cy="9"  r="1.7"/><circle cx="15" cy="9"  r="1.7"/>
+          <circle cx="3"  cy="15" r="1.7"/><circle cx="9"  cy="15" r="1.7"/><circle cx="15" cy="15" r="1.7"/>
+        </svg>
+      </button>
+      <div class="user-dropdown" id="user-dropdown" hidden>
+        <div class="user-email">
+          <span class="user-email-label">Signed in as</span>
+          <span id="user-email">…</span>
+        </div>
+        <a class="menu-link" href="/swagger" target="_blank">API Docs</a>
+        <a class="menu-link" href="/tokens">API Tokens</a>
+        <button class="logout-btn" id="logout-btn">Sign out</button>
+      </div>
+    </div>
   </div>
 </header>
 
 <main>
   <div class="card">
     <label for="terms">Search terms</label>
-    <textarea id="terms" placeholder="aa:bb:cc:dd:ee:ff&#10;10.0.0.203&#10;aabb.ccdd.eeff&#10;MachineName1&#10;MachineName1.local.net"></textarea>
+    <textarea id="terms" placeholder="aa:bb:cc:dd:ee:ff&#10;10.0.0.203&#10;aabb.ccdd.eeff&#10;PRG-WAH-CSR0154&#10;PRG-WAH-CSR0154.afni.net"></textarea>
     <div class="actions">
       <button class="btn-primary" id="search-btn">Search</button>
       <button class="btn-secondary" id="clear-btn">Clear</button>
@@ -513,6 +600,39 @@ document.querySelectorAll('thead th').forEach((th, i) => {
     });
   });
 })();
+
+// --- Waffle user menu ---
+const waffleBtn    = document.getElementById('waffle-btn');
+const userDropdown = document.getElementById('user-dropdown');
+
+function closeUserMenu() {
+  userDropdown.hidden = true;
+  waffleBtn.setAttribute('aria-expanded', 'false');
+}
+
+waffleBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  const opening = userDropdown.hidden;
+  userDropdown.hidden = !opening;
+  waffleBtn.setAttribute('aria-expanded', String(opening));
+});
+
+document.addEventListener('click', e => {
+  if (!userDropdown.hidden && !userDropdown.contains(e.target)) closeUserMenu();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeUserMenu();
+});
+
+document.getElementById('logout-btn').addEventListener('click', () => {
+  window.location.href = '/logout';
+});
+
+fetch('/api/me')
+  .then(r => r.ok ? r.json() : Promise.reject())
+  .then(d => { document.getElementById('user-email').textContent = d.user || 'unknown'; })
+  .catch(() => { document.getElementById('user-email').textContent = 'unknown'; });
 
 // --- Search ---
 async function doSearch() {

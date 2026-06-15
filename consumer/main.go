@@ -19,8 +19,10 @@ type VlanEntry struct {
     Timestamp time.Time `json:"timestamp"`
     NodeID    string    `json:"node_id"`
     VlanID    uint32    `json:"vlan_id"`
-    Name      string    `json:"name"`
-    Status    string    `json:"status"`
+    // Pointer mirrors the collector: nil = absent (no-op), &"" = clear, &"x" = set.
+    // An absent JSON key and an explicit null both unmarshal to nil.
+    Name   *string `json:"name"`
+    Status string  `json:"status"`
 }
 
 type MacEntry struct {
@@ -57,19 +59,31 @@ type IfEntry struct {
 
 // ── Kafka consumer handler ───────────────────────────────────────────────────
 
+const (
+    macBatchSize    = 500
+    macBatchTimeout = 100 * time.Millisecond
+    arpBatchSize    = 500
+    arpBatchTimeout = 100 * time.Millisecond
+)
+
+type macKey struct{ nodeID, mac string }
+type arpKey struct{ nodeID, ip string }
+
 type handler struct{ db *pgxpool.Pool }
 
 func (h *handler) Setup(_ sarama.ConsumerGroupSession) error   { return nil }
 func (h *handler) Cleanup(_ sarama.ConsumerGroupSession) error { return nil }
 
 func (h *handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    switch claim.Topic() {
+    case "mac-table":
+        return h.consumeMACBatch(sess, claim)
+    case "arp-table":
+        return h.consumeARPBatch(sess, claim)
+    }
     for msg := range claim.Messages() {
         var err error
         switch msg.Topic {
-        case "mac-table":
-            err = h.handleMAC(msg.Value)
-        case "arp-table":
-            err = h.handleARP(msg.Value)
         case "interface-table":
             err = h.handleInterface(msg.Value)
         case "vlan-table":
@@ -84,39 +98,170 @@ func (h *handler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.Co
     return nil
 }
 
-func (h *handler) handleMAC(b []byte) error {
-    var e MacEntry
-    if err := json.Unmarshal(b, &e); err != nil {
-        return err
+// consumeMACBatch buffers mac-table messages and flushes them as a single
+// batched upsert, either when the batch reaches macBatchSize or macBatchTimeout
+// elapses. Entries with the same (node_id, mac_address) key are deduplicated
+// within the batch, keeping the one with the latest timestamp.
+func (h *handler) consumeMACBatch(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    batch := make(map[macKey]MacEntry, macBatchSize)
+    var lastMsg *sarama.ConsumerMessage
+
+    flush := func() {
+        if len(batch) == 0 {
+            return
+        }
+        nodeIDs := make([]string, 0, len(batch))
+        macs    := make([]string, 0, len(batch))
+        ifaces  := make([]string, 0, len(batch))
+        vlans   := make([]int32, 0, len(batch))
+        types   := make([]string, 0, len(batch))
+        times   := make([]time.Time, 0, len(batch))
+        for _, e := range batch {
+            nodeIDs = append(nodeIDs, e.NodeID)
+            macs    = append(macs, e.MacAddress)
+            ifaces  = append(ifaces, e.Interface)
+            vlans   = append(vlans, int32(e.Vlan))
+            types   = append(types, e.Type)
+            times   = append(times, e.Timestamp)
+        }
+        _, err := h.db.Exec(context.Background(), `
+            INSERT INTO mac_table (node_id, mac_address, interface, vlan, mac_type, collected_at)
+            SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::int[], $5::text[], $6::timestamptz[])
+                AS t(node_id, mac_address, interface, vlan, mac_type, collected_at)
+            ON CONFLICT (node_id, mac_address) DO UPDATE SET
+                interface    = EXCLUDED.interface,
+                vlan         = EXCLUDED.vlan,
+                mac_type     = EXCLUDED.mac_type,
+                collected_at = EXCLUDED.collected_at`,
+            nodeIDs, macs, ifaces, vlans, types, times)
+        if err != nil {
+            log.Printf("mac batch flush (%d rows): %v", len(batch), err)
+            return
+        }
+        sess.MarkMessage(lastMsg, "")
+        batch = make(map[macKey]MacEntry, macBatchSize)
+        lastMsg = nil
     }
-    _, err := h.db.Exec(context.Background(), `
-        INSERT INTO mac_table (node_id, mac_address, interface, vlan, mac_type, collected_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (node_id, mac_address) DO UPDATE SET
-            node_id      = EXCLUDED.node_id,
-            interface    = EXCLUDED.interface,
-            vlan         = EXCLUDED.vlan,
-            mac_type     = EXCLUDED.mac_type,
-            collected_at = EXCLUDED.collected_at`,
-        e.NodeID, e.MacAddress, e.Interface, e.Vlan, e.Type, e.Timestamp)
-    return err
+
+    timer := time.NewTimer(macBatchTimeout)
+    defer timer.Stop()
+
+    for {
+        select {
+        case msg, ok := <-claim.Messages():
+            if !ok {
+                flush()
+                return nil
+            }
+            var entries []MacEntry
+            if err := json.Unmarshal(msg.Value, &entries); err != nil {
+                log.Printf("handle mac-table: %v", err)
+                sess.MarkMessage(msg, "")
+                continue
+            }
+            for _, e := range entries {
+                k := macKey{e.NodeID, e.MacAddress}
+                if cur, exists := batch[k]; !exists || e.Timestamp.After(cur.Timestamp) {
+                    batch[k] = e
+                }
+            }
+            lastMsg = msg
+            if len(batch) >= macBatchSize {
+                flush()
+                if !timer.Stop() {
+                    select {
+                    case <-timer.C:
+                    default:
+                    }
+                }
+                timer.Reset(macBatchTimeout)
+            }
+        case <-timer.C:
+            flush()
+            timer.Reset(macBatchTimeout)
+        }
+    }
 }
 
-func (h *handler) handleARP(b []byte) error {
-    var e ArpEntry
-    if err := json.Unmarshal(b, &e); err != nil {
-        return err
+func (h *handler) consumeARPBatch(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    batch := make(map[arpKey]ArpEntry, arpBatchSize)
+    var lastMsg *sarama.ConsumerMessage
+
+    flush := func() {
+        if len(batch) == 0 {
+            return
+        }
+        nodeIDs := make([]string, 0, len(batch))
+        ips     := make([]string, 0, len(batch))
+        macs    := make([]string, 0, len(batch))
+        ifaces  := make([]string, 0, len(batch))
+        ages    := make([]int32, 0, len(batch))
+        times   := make([]time.Time, 0, len(batch))
+        for _, e := range batch {
+            nodeIDs = append(nodeIDs, e.NodeID)
+            ips     = append(ips, e.IPAddress)
+            macs    = append(macs, e.MacAddress)
+            ifaces  = append(ifaces, e.Interface)
+            ages    = append(ages, int32(e.Age))
+            times   = append(times, e.Timestamp)
+        }
+        _, err := h.db.Exec(context.Background(), `
+            INSERT INTO arp_table (node_id, ip_address, mac_address, interface, age_seconds, collected_at)
+            SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::int[], $6::timestamptz[])
+                AS t(node_id, ip_address, mac_address, interface, age_seconds, collected_at)
+            ON CONFLICT (node_id, ip_address) DO UPDATE SET
+                mac_address  = EXCLUDED.mac_address,
+                interface    = EXCLUDED.interface,
+                age_seconds  = EXCLUDED.age_seconds,
+                collected_at = EXCLUDED.collected_at`,
+            nodeIDs, ips, macs, ifaces, ages, times)
+        if err != nil {
+            log.Printf("arp batch flush (%d rows): %v", len(batch), err)
+            return
+        }
+        sess.MarkMessage(lastMsg, "")
+        batch = make(map[arpKey]ArpEntry, arpBatchSize)
+        lastMsg = nil
     }
-    _, err := h.db.Exec(context.Background(), `
-        INSERT INTO arp_table (node_id, ip_address, mac_address, interface, age_seconds, collected_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (node_id, ip_address) DO UPDATE SET
-            mac_address  = EXCLUDED.mac_address,
-            interface    = EXCLUDED.interface,
-            age_seconds  = EXCLUDED.age_seconds,
-            collected_at = EXCLUDED.collected_at`,
-        e.NodeID, e.IPAddress, e.MacAddress, e.Interface, e.Age, e.Timestamp)
-    return err
+
+    timer := time.NewTimer(arpBatchTimeout)
+    defer timer.Stop()
+
+    for {
+        select {
+        case msg, ok := <-claim.Messages():
+            if !ok {
+                flush()
+                return nil
+            }
+            var entries []ArpEntry
+            if err := json.Unmarshal(msg.Value, &entries); err != nil {
+                log.Printf("handle arp-table: %v", err)
+                sess.MarkMessage(msg, "")
+                continue
+            }
+            for _, e := range entries {
+                k := arpKey{e.NodeID, e.IPAddress}
+                if cur, exists := batch[k]; !exists || e.Timestamp.After(cur.Timestamp) {
+                    batch[k] = e
+                }
+            }
+            lastMsg = msg
+            if len(batch) >= arpBatchSize {
+                flush()
+                if !timer.Stop() {
+                    select {
+                    case <-timer.C:
+                    default:
+                    }
+                }
+                timer.Reset(arpBatchTimeout)
+            }
+        case <-timer.C:
+            flush()
+            timer.Reset(arpBatchTimeout)
+        }
+    }
 }
 
 func (h *handler) handleInterface(b []byte) error {
@@ -124,6 +269,13 @@ func (h *handler) handleInterface(b []byte) error {
     if err := json.Unmarshal(b, &e); err != nil {
         return err
     }
+    // description, ip_address, prefix_len, access_vlan and voice_vlan are passed
+    // as pointers, so pgx sends NULL for an absent field, the zero value ('' or 0)
+    // for an explicit clear, and the real value otherwise. COALESCE(EXCLUDED.x,
+    // interface_table.x) then means: NULL leaves the stored value untouched, while
+    // a present zero value overwrites it. The WHERE guard on DO UPDATE drops a
+    // stale row (e.g. a periodic snapshot that arrives after a newer on-change
+    // clear) so it can't resurrect a just-removed value. Mirrors handleVlan.
     _, err := h.db.Exec(context.Background(), `
         INSERT INTO interface_table (node_id, name, description, shutdown, ip_address, prefix_len, vrf, mtu, access_vlan, voice_vlan, collected_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::smallint, 1), $10::smallint, $11)
@@ -136,7 +288,8 @@ func (h *handler) handleInterface(b []byte) error {
             mtu          = COALESCE(EXCLUDED.mtu,                 interface_table.mtu),
             access_vlan  = COALESCE($9::smallint,                 interface_table.access_vlan),
             voice_vlan   = COALESCE($10::smallint,                interface_table.voice_vlan),
-            collected_at = EXCLUDED.collected_at`,
+            collected_at = EXCLUDED.collected_at
+        WHERE EXCLUDED.collected_at >= interface_table.collected_at`,
         e.NodeID, e.Name, e.Description, e.Shutdown,
         e.IPAddress, e.PrefixLen, e.VRF, e.MTU,
         e.AccessVlan, e.VoiceVlan, e.Timestamp)
@@ -148,13 +301,20 @@ func (h *handler) handleVlan(b []byte) error {
     if err := json.Unmarshal(b, &e); err != nil {
         return err
     }
+    // name is passed as a *string ($3), so pgx sends NULL for an absent name,
+    // '' for an explicit clear, and the value otherwise. COALESCE(EXCLUDED.name,
+    // vlan_table.name) then means: NULL leaves the stored name untouched, while
+    // '' overwrites it with an empty string. The WHERE guard on DO UPDATE drops
+    // a stale row (e.g. a periodic snapshot that arrives after a newer on-change
+    // clear) so it can't resurrect a just-removed name.
     _, err := h.db.Exec(context.Background(), `
         INSERT INTO vlan_table (node_id, vlan_id, name, status, collected_at)
-        VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5)
+        VALUES ($1, $2, $3, NULLIF($4,''), $5)
         ON CONFLICT (node_id, vlan_id) DO UPDATE SET
-            name         = EXCLUDED.name,
-            status       = EXCLUDED.status,
-            collected_at = EXCLUDED.collected_at`,
+            name         = COALESCE(EXCLUDED.name,   vlan_table.name),
+            status       = COALESCE(EXCLUDED.status, vlan_table.status),
+            collected_at = EXCLUDED.collected_at
+        WHERE EXCLUDED.collected_at >= vlan_table.collected_at`,
         e.NodeID, e.VlanID, e.Name, e.Status, e.Timestamp)
     return err
 }
