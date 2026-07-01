@@ -119,17 +119,46 @@
   }
   .tab.active .badge { background: #dbeafe; color: #1d4ed8; }
 
+  /* Search row */
+  .search-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid #f1f5f9;
+    background: #fafbfc;
+  }
+  .search-input {
+    flex: 1;
+    max-width: 480px;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.5rem;
+    padding: 0.45rem 0.8rem;
+    font-size: 0.875rem;
+    color: #1e293b;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    background: white;
+  }
+  .search-input:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
+  }
+  .search-hint {
+    font-size: 0.8rem;
+    color: #94a3b8;
+  }
+
   /* Panel */
-  .tab-panel { display: none; padding: 1rem 1.25rem 1.25rem; }
+  .tab-panel { display: none; }
   .tab-panel.active { display: block; }
 
   .panel-meta {
     font-size: 0.8rem;
     color: #64748b;
-    margin-bottom: 0.875rem;
+    padding: 0.6rem 1.25rem 0;
   }
   .panel-meta strong { color: #1e293b; }
-  .limit-note { color: #d97706; font-weight: 500; }
 
   /* Status */
   .status-box { text-align: center; padding: 2.5rem 1rem; color: #64748b; font-size: 0.9rem; }
@@ -154,7 +183,8 @@
   }
 
   /* Table */
-  .table-wrap { overflow-x: auto; border-radius: 0.5rem; border: 1px solid #e2e8f0; }
+  .table-outer { padding: 0 1.25rem 1rem; }
+  .table-wrap-inner { overflow-x: auto; border-radius: 0.5rem; border: 1px solid #e2e8f0; }
   table { width: 100%; border-collapse: collapse; font-size: 0.815rem; white-space: nowrap; }
   thead th {
     background: #1e3a8a;
@@ -186,10 +216,28 @@
   .bool-yes { color: #dc2626; font-weight: 600; }
   .bool-no  { color: #94a3b8; }
 
+  /* Pagination */
+  .pagination-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid #f1f5f9;
+  }
+  .page-ellipsis {
+    color: #94a3b8;
+    padding: 0 0.125rem;
+    font-size: 0.875rem;
+    line-height: 1;
+    user-select: none;
+  }
+
   /* Buttons */
   button {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.375rem;
     padding: 0.45rem 1rem;
     border-radius: 0.5rem;
@@ -199,9 +247,25 @@
     border: none;
     transition: background 0.15s, opacity 0.15s;
   }
-  button:disabled { opacity: 0.55; cursor: not-allowed; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
   .btn-primary { background: #1d4ed8; color: white; }
   .btn-primary:hover:not(:disabled) { background: #1e40af; }
+
+  .page-btn {
+    padding: 0.3rem 0.6rem;
+    border-radius: 0.375rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    color: #475569;
+    cursor: pointer;
+    min-width: 2rem;
+    transition: background 0.1s, border-color 0.1s, color 0.1s;
+  }
+  .page-btn:hover:not(:disabled) { background: #e2e8f0; border-color: #cbd5e1; }
+  .page-btn.active { background: #1d4ed8; border-color: #1d4ed8; color: white; }
+  .page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -225,7 +289,7 @@
 
   <div class="card">
     <div class="card-toolbar">
-      <button class="btn-primary" id="refresh-btn">↻ Refresh</button>
+      <button class="btn-primary" id="refresh-btn">↻ Refresh all</button>
       <span class="toolbar-status">
         <span class="mini-spinner" id="toolbar-spinner"></span>
         <span id="toolbar-msg"></span>
@@ -241,38 +305,56 @@
     </div>
 
     <div class="tab-panel active" id="panel-mac">
+      <div class="search-row">
+        <input type="search" id="search-mac" class="search-input" placeholder="Search by MAC, node, interface, VLAN…" autocomplete="off">
+        <span class="search-hint" id="search-hint-mac"></span>
+      </div>
       <div id="status-mac" class="status-box"><div class="spinner"></div>Loading…</div>
       <div id="meta-mac" class="panel-meta" hidden></div>
-      <div id="table-mac" hidden></div>
+      <div id="table-mac" class="table-outer" hidden></div>
+      <div id="pagination-mac" hidden></div>
     </div>
 
     <div class="tab-panel" id="panel-arp">
+      <div class="search-row">
+        <input type="search" id="search-arp" class="search-input" placeholder="Search by IP, MAC, node, interface…" autocomplete="off">
+        <span class="search-hint" id="search-hint-arp"></span>
+      </div>
       <div id="status-arp" class="status-box"><div class="spinner"></div>Loading…</div>
       <div id="meta-arp" class="panel-meta" hidden></div>
-      <div id="table-arp" hidden></div>
+      <div id="table-arp" class="table-outer" hidden></div>
+      <div id="pagination-arp" hidden></div>
     </div>
 
     <div class="tab-panel" id="panel-interface">
+      <div class="search-row">
+        <input type="search" id="search-interface" class="search-input" placeholder="Search by name, node, IP, description, VRF…" autocomplete="off">
+        <span class="search-hint" id="search-hint-interface"></span>
+      </div>
       <div id="status-interface" class="status-box"><div class="spinner"></div>Loading…</div>
       <div id="meta-interface" class="panel-meta" hidden></div>
-      <div id="table-interface" hidden></div>
+      <div id="table-interface" class="table-outer" hidden></div>
+      <div id="pagination-interface" hidden></div>
     </div>
 
     <div class="tab-panel" id="panel-vlan">
+      <div class="search-row">
+        <input type="search" id="search-vlan" class="search-input" placeholder="Search by VLAN ID, name, node, status…" autocomplete="off">
+        <span class="search-hint" id="search-hint-vlan"></span>
+      </div>
       <div id="status-vlan" class="status-box"><div class="spinner"></div>Loading…</div>
       <div id="meta-vlan" class="panel-meta" hidden></div>
-      <div id="table-vlan" hidden></div>
+      <div id="table-vlan" class="table-outer" hidden></div>
+      <div id="pagination-vlan" hidden></div>
     </div>
   </div>
 </main>
 
 <script>
-const LIMIT = 500;
+const PAGE_SIZE = 100;
 
 const TABLE_DEFS = {
   mac: {
-    rowsKey: 'mac_rows',
-    totalKey: 'mac_total',
     cols: [
       { key: 'id',           label: 'ID',           type: 'id' },
       { key: 'node_id',      label: 'Node ID' },
@@ -284,8 +366,6 @@ const TABLE_DEFS = {
     ],
   },
   arp: {
-    rowsKey: 'arp_rows',
-    totalKey: 'arp_total',
     cols: [
       { key: 'id',           label: 'ID',           type: 'id' },
       { key: 'node_id',      label: 'Node ID' },
@@ -297,8 +377,6 @@ const TABLE_DEFS = {
     ],
   },
   interface: {
-    rowsKey: 'interface_rows',
-    totalKey: 'interface_total',
     cols: [
       { key: 'id',           label: 'ID',           type: 'id' },
       { key: 'node_id',      label: 'Node ID' },
@@ -315,8 +393,6 @@ const TABLE_DEFS = {
     ],
   },
   vlan: {
-    rowsKey: 'vlan_rows',
-    totalKey: 'vlan_total',
     cols: [
       { key: 'id',           label: 'ID',           type: 'id' },
       { key: 'node_id',      label: 'Node ID' },
@@ -327,6 +403,14 @@ const TABLE_DEFS = {
     ],
   },
 };
+
+// Per-table state
+const tableState = {};
+Object.keys(TABLE_DEFS).forEach(key => {
+  tableState[key] = { page: 1, query: '', total: 0, filteredTotal: 0, pages: 1, loading: false };
+});
+
+const debounceTimers = {};
 
 function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -352,86 +436,167 @@ function renderCell(v, type) {
 function buildTable(cols, rows) {
   const thead = `<thead><tr>${cols.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>`;
   const tbody = rows.length === 0
-    ? `<tbody><tr><td colspan="${cols.length}" style="text-align:center;color:#94a3b8;padding:2rem">No rows</td></tr></tbody>`
+    ? `<tbody><tr><td colspan="${cols.length}" style="text-align:center;color:#94a3b8;padding:2rem">No rows found</td></tr></tbody>`
     : `<tbody>${rows.map(row =>
         `<tr>${cols.map(c => {
           const extra = c.type === 'desc' ? ' class="desc"' : c.type === 'id' ? ' class="id-col"' : '';
           return `<td${extra}>${renderCell(row[c.key], c.type)}</td>`;
         }).join('')}</tr>`
       ).join('')}</tbody>`;
-  return `<div class="table-wrap"><table>${thead}${tbody}</table></div>`;
+  return `<div class="table-wrap-inner"><table>${thead}${tbody}</table></div>`;
 }
 
-function populatePanel(key, data) {
-  const def   = TABLE_DEFS[key];
-  const rows  = data[def.rowsKey] ?? [];
-  const total = data[def.totalKey] ?? 0;
+function buildPagination(key) {
+  const s = tableState[key];
+  if (s.pages <= 1) return '';
 
-  document.getElementById(`badge-${key}`).textContent = total.toLocaleString();
-  document.getElementById(`status-${key}`).hidden = true;
+  const prevDis = s.page <= 1 ? ' disabled' : '';
+  const nextDis = s.page >= s.pages ? ' disabled' : '';
 
-  const meta = document.getElementById(`meta-${key}`);
-  let metaText = `Showing <strong>${rows.length.toLocaleString()}</strong> of <strong>${total.toLocaleString()}</strong> rows`;
-  if (total > LIMIT) {
-    metaText += ` &nbsp;<span class="limit-note">(newest ${LIMIT} shown)</span>`;
+  // Page number window (up to 7 buttons)
+  const WINDOW = 7;
+  const half = Math.floor(WINDOW / 2);
+  let wStart = Math.max(1, s.page - half);
+  let wEnd   = Math.min(s.pages, wStart + WINDOW - 1);
+  wStart = Math.max(1, wEnd - WINDOW + 1);
+
+  let nums = '';
+  if (wStart > 1) nums += `<button class="page-btn" onclick="goPage('${key}',1)">1</button>`;
+  if (wStart > 2) nums += `<span class="page-ellipsis">…</span>`;
+  for (let i = wStart; i <= wEnd; i++) {
+    const act = i === s.page ? ' active' : '';
+    nums += `<button class="page-btn${act}" onclick="goPage('${key}',${i})">${i}</button>`;
   }
-  meta.innerHTML = metaText;
-  meta.hidden = false;
+  if (wEnd < s.pages - 1) nums += `<span class="page-ellipsis">…</span>`;
+  if (wEnd < s.pages) nums += `<button class="page-btn" onclick="goPage('${key}',${s.pages})">${s.pages}</button>`;
 
-  const tableDiv = document.getElementById(`table-${key}`);
-  tableDiv.innerHTML = buildTable(def.cols, rows);
-  tableDiv.hidden = false;
+  return `<div class="pagination-bar">
+    <button class="page-btn"${prevDis} onclick="goPage('${key}',${s.page - 1})">← Prev</button>
+    ${nums}
+    <button class="page-btn"${nextDis} onclick="goPage('${key}',${s.page + 1})">Next →</button>
+  </div>`;
 }
 
-function showError(msg) {
-  const box = document.getElementById('global-error');
-  box.textContent = msg;
-  box.hidden = false;
-  Object.keys(TABLE_DEFS).forEach(key => {
-    const s = document.getElementById(`status-${key}`);
-    s.innerHTML = `<div style="color:#dc2626">Failed to load</div>`;
-    s.hidden = false;
-  });
+function goPage(key, page) {
+  const s = tableState[key];
+  if (page < 1 || page > s.pages) return;
+  s.page = page;
+  loadTable(key);
 }
 
-async function loadData() {
-  const refreshBtn   = document.getElementById('refresh-btn');
-  const spinner      = document.getElementById('toolbar-spinner');
-  const msg          = document.getElementById('toolbar-msg');
-  const ts           = document.getElementById('toolbar-ts');
-  const globalErr    = document.getElementById('global-error');
+async function loadTable(key) {
+  const s = tableState[key];
+  if (s.loading) return;
+  s.loading = true;
+
+  const params = new URLSearchParams({ table: key, page: s.page, limit: PAGE_SIZE });
+  if (s.query) params.set('q', s.query);
+
+  const statusEl    = document.getElementById(`status-${key}`);
+  const metaEl      = document.getElementById(`meta-${key}`);
+  const tableEl     = document.getElementById(`table-${key}`);
+  const paginEl     = document.getElementById(`pagination-${key}`);
+  const hintEl      = document.getElementById(`search-hint-${key}`);
+  const badgeEl     = document.getElementById(`badge-${key}`);
+
+  statusEl.innerHTML = '<div class="spinner"></div>Loading…';
+  statusEl.hidden = false;
+  metaEl.hidden = true;
+  tableEl.hidden = true;
+  paginEl.hidden = true;
+
+  try {
+    const res = await fetch(`/api/db-inspect-table?${params}`);
+    if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+    const data = await res.json();
+
+    s.total         = data.total;
+    s.filteredTotal = data.filtered_total;
+    s.pages         = data.pages;
+
+    // Badge: show filtered/total when searching, total otherwise
+    if (s.query) {
+      badgeEl.textContent = `${data.filtered_total.toLocaleString()} / ${data.total.toLocaleString()}`;
+    } else {
+      badgeEl.textContent = data.total.toLocaleString();
+    }
+
+    // Meta line
+    const rows = data.rows ?? [];
+    const pageStart = (s.page - 1) * PAGE_SIZE + 1;
+    const pageEnd   = pageStart + rows.length - 1;
+    let metaText = rows.length > 0
+      ? `Rows <strong>${pageStart.toLocaleString()}–${pageEnd.toLocaleString()}</strong>`
+      : `<strong>0</strong> rows`;
+    if (s.query) {
+      metaText += ` of <strong>${data.filtered_total.toLocaleString()}</strong> matching`;
+      metaText += ` (${data.total.toLocaleString()} total) — page <strong>${s.page}</strong> of <strong>${s.pages}</strong>`;
+      hintEl.textContent = `${data.filtered_total.toLocaleString()} match${data.filtered_total === 1 ? '' : 'es'}`;
+    } else {
+      metaText += ` of <strong>${data.total.toLocaleString()}</strong> total — page <strong>${s.page}</strong> of <strong>${s.pages}</strong>`;
+      hintEl.textContent = '';
+    }
+    metaEl.innerHTML = metaText;
+    metaEl.hidden = false;
+
+    // Table
+    const def = TABLE_DEFS[key];
+    tableEl.innerHTML = buildTable(def.cols, rows);
+    tableEl.hidden = false;
+
+    // Pagination
+    const paginHTML = buildPagination(key);
+    if (paginHTML) {
+      paginEl.innerHTML = paginHTML;
+      paginEl.hidden = false;
+    }
+
+    statusEl.hidden = true;
+  } catch (err) {
+    statusEl.innerHTML = `<div style="color:#dc2626">Error loading ${key}: ${esc(err.message)}</div>`;
+    statusEl.hidden = false;
+    badgeEl.textContent = '!';
+    hintEl.textContent = '';
+  } finally {
+    s.loading = false;
+  }
+}
+
+async function loadAllTables() {
+  const refreshBtn = document.getElementById('refresh-btn');
+  const spinner    = document.getElementById('toolbar-spinner');
+  const msg        = document.getElementById('toolbar-msg');
+  const ts         = document.getElementById('toolbar-ts');
 
   refreshBtn.disabled = true;
   spinner.classList.add('active');
   msg.textContent = 'Loading…';
-  globalErr.hidden = true;
 
-  Object.keys(TABLE_DEFS).forEach(key => {
-    document.getElementById(`table-${key}`).hidden = true;
-    document.getElementById(`meta-${key}`).hidden  = true;
-    document.getElementById(`status-${key}`).hidden = false;
-    document.getElementById(`status-${key}`).innerHTML = '<div class="spinner"></div>Loading…';
-  });
+  // Reset to page 1 for all tables on full refresh
+  Object.keys(TABLE_DEFS).forEach(key => { tableState[key].page = 1; });
 
-  try {
-    const res = await fetch('/api/db-inspect');
-    if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
-    const data = await res.json();
+  await Promise.all(Object.keys(TABLE_DEFS).map(key => loadTable(key)));
 
-    Object.keys(TABLE_DEFS).forEach(key => populatePanel(key, data));
-
-    const now = new Date();
-    ts.textContent = `Last updated: ${now.toLocaleTimeString()}`;
-    msg.textContent = '';
-  } catch (err) {
-    showError('Failed to load data: ' + err.message);
-    msg.textContent = 'Error';
-    ts.textContent  = '';
-  } finally {
-    refreshBtn.disabled = false;
-    spinner.classList.remove('active');
-  }
+  const now = new Date();
+  ts.textContent = `Last updated: ${now.toLocaleTimeString()}`;
+  msg.textContent = '';
+  refreshBtn.disabled = false;
+  spinner.classList.remove('active');
 }
+
+// Search inputs — debounced 350 ms
+Object.keys(TABLE_DEFS).forEach(key => {
+  const input = document.getElementById(`search-${key}`);
+  if (!input) return;
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimers[key]);
+    debounceTimers[key] = setTimeout(() => {
+      tableState[key].query = input.value.trim();
+      tableState[key].page  = 1;
+      loadTable(key);
+    }, 350);
+  });
+});
 
 // Tab switching
 document.getElementById('tab-bar').addEventListener('click', e => {
@@ -444,9 +609,9 @@ document.getElementById('tab-bar').addEventListener('click', e => {
   document.getElementById(`panel-${key}`).classList.add('active');
 });
 
-document.getElementById('refresh-btn').addEventListener('click', loadData);
+document.getElementById('refresh-btn').addEventListener('click', loadAllTables);
 
-loadData();
+loadAllTables();
 </script>
 </body>
 </html>

@@ -361,6 +361,59 @@ func maskToPrefixLen(mask string) int {
 	return ones
 }
 
+// isIfaceNode reports whether f is an interface instance node: it must have at
+// least one direct child leaf named "name" that carries a scalar value.
+// The node's own .Name is the interface type (e.g. "TwentyFiveGigE", "Vlan").
+func isIfaceNode(f *telpb.TelemetryField) bool {
+	for _, child := range f.Fields {
+		name := child.Name
+		if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			name = name[idx+1:]
+		}
+		if name == "name" && child.ValueByType != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// collectInterfaces returns every interface-instance node reachable from root
+// using an iterative stack walk. This handles two IOS-XE serializer layouts:
+//
+//   - Flat (17.15.x+): every interface is a sibling directly under content.
+//     The walk visits each child of root; each is an interface node with no
+//     interface-node children → all are collected, no chaining occurs.
+//
+//   - Nested chain (17.12.x): the first instance of each type is a direct child
+//     of content; every subsequent instance of that type is nested inside the
+//     previous one. The walk follows those interface-node children, unwinding
+//     the chain to any depth without recursion.
+func collectInterfaces(root *telpb.TelemetryField) []*telpb.TelemetryField {
+	var result []*telpb.TelemetryField
+	stack := make([]*telpb.TelemetryField, 0, len(root.Fields))
+	stack = append(stack, root.Fields...)
+	for len(stack) > 0 {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if isIfaceNode(f) {
+			result = append(result, f)
+			// Follow only the chain links: children that are themselves interface
+			// nodes. Non-interface children are this interface's own data leaves
+			// and are processed separately in the field extraction loop below.
+			for _, child := range f.Fields {
+				if isIfaceNode(child) {
+					stack = append(stack, child)
+				}
+			}
+		} else {
+			// Not an interface node (e.g. an intermediate container); keep
+			// searching by pushing all its children.
+			stack = append(stack, f.Fields...)
+		}
+	}
+	return result
+}
+
 func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 	if intDebug {
 		log.Printf("INT DEBUG node=%s path=%s collection_id=%d rows=%d",
@@ -371,10 +424,6 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 	}
 	ts := time.UnixMilli(int64(t.MsgTimestamp))
 	for _, row := range t.DataGpbkv {
-		// The native interface container sends all interface entries inside a
-		// single "content" field. Each child of content is named after the
-		// interface type (GigabitEthernet, Vlan, Port-channel, etc.) and holds
-		// the per-interface config — including the "name" key — as flat siblings.
 		var content *telpb.TelemetryField
 		for _, f := range row.Fields {
 			if f.Name == "content" {
@@ -385,7 +434,7 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 		if content == nil {
 			continue
 		}
-		for _, iface := range content.Fields {
+		for _, iface := range collectInterfaces(content) {
 			ifType := iface.Name // e.g. "GigabitEthernet", "Vlan", "Port-channel"
 			entry := IfEntry{
 				Timestamp: ts,
@@ -393,6 +442,11 @@ func (s *telemetryServer) publishInterface(t *telpb.Telemetry) error {
 			}
 
 			for _, f := range iface.Fields {
+				// Skip children that are themselves interface nodes — those are the
+				// next link in the chain (nested layout), not this interface's data.
+				if isIfaceNode(f) {
+					continue
+				}
 				switch f.Name {
 				case "name":
 					// GigabitEthernet uses string (e.g. "1/0/1"); Vlan and

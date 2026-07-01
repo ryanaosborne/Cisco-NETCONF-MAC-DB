@@ -17,7 +17,7 @@ services:
       - "19092:19092"
       - "9644:9644"
     volumes:
-      - redpanda-data:/var/lib/redpanda
+      - redpanda-data:/var/lib/redpanda/data
     logging:
       driver: "json-file"
       options:
@@ -36,10 +36,18 @@ services:
     image: redpandadata/redpanda:v24.1.6
     container_name: redpanda-setup
     entrypoint: ["/bin/bash", "-c"]
-    command: >-
-      rpk cluster config set log_segment_size 67108864 --api-urls http://redpanda:9644 &&
-      rpk cluster config set log_retention_ms 3600000 --api-urls http://redpanda:9644 &&
-      rpk cluster config set log_retention_bytes 268435456 --api-urls http://redpanda:9644
+    command:
+      - |
+        rpk topic create arp-table interface-table mac-table vlan-table \
+          --topic-config retention.ms=3600000 \
+          --topic-config retention.bytes=268435456 \
+          --topic-config segment.bytes=67108864 \
+          --brokers redpanda:9092 2>/dev/null
+        rpk topic alter-config arp-table interface-table mac-table vlan-table \
+          --set retention.ms=3600000 \
+          --set retention.bytes=268435456 \
+          --set segment.bytes=67108864 \
+          --brokers redpanda:9092
     depends_on:
       redpanda:
         condition: service_healthy
@@ -125,7 +133,6 @@ services:
     depends_on:
       # - kafka-ui   # uncomment when kafka-ui is enabled (step 2)
       - webapp
-      - webapp_dev
     ports:
       - "80:80"
       - "443:443"
